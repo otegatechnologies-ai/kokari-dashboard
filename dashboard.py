@@ -178,6 +178,8 @@ def init_db():
         if cur.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             cur.execute("INSERT INTO users (username,password,role) VALUES (?,?,?)",
                         ("admin", hash_pw("kokari2026"), "admin"))
+            cur.execute("INSERT INTO users (username,password,role) VALUES (?,?,?)",
+                        ("attendant", hash_pw("kokari123"), "attendant"))
 
         if cur.execute("SELECT COUNT(*) FROM channels").fetchone()[0] == 0:
             for ch in ["Cafe","B2B","Packaged","Retail","Other"]:
@@ -825,6 +827,152 @@ def pdf_download_button(html, filename):
 
 
 # ─────────────────────────────────────────────────────────────────
+# RECEIPT GENERATOR
+# ─────────────────────────────────────────────────────────────────
+def generate_receipt_html(order_date, customer, phone, order_type, payment,
+                           status, note, items, subtotal, vat_amount, grand_total,
+                           apply_vat, split_pay, receipt_no):
+    """Generate a professional printable receipt as HTML."""
+    rows = ""
+    for it in items:
+        rows += (f"<tr><td>{it['product_name']}</td>"
+                 f"<td style='text-align:center'>{it['qty']}</td>"
+                 f"<td style='text-align:right'>₦{it['unit_price']:,.0f}</td>"
+                 f"<td style='text-align:right'>₦{it['total_price']:,.0f}</td></tr>")
+
+    vat_row = ""
+    if apply_vat:
+        vat_row = f"""
+        <tr style='border-top:1px solid #e5e7eb'>
+          <td colspan='3' style='text-align:right;padding:4px 8px;color:#6b7280'>Subtotal</td>
+          <td style='text-align:right;padding:4px 8px'>₦{subtotal:,.0f}</td>
+        </tr>
+        <tr>
+          <td colspan='3' style='text-align:right;padding:4px 8px;color:#6b7280'>VAT (7.5%)</td>
+          <td style='text-align:right;padding:4px 8px'>₦{vat_amount:,.0f}</td>
+        </tr>"""
+
+    split_note = ""
+    if split_pay:
+        p1_method = split_pay.get("method1","")
+        p1_amount = split_pay.get("amount1",0)
+        p2_method = split_pay.get("method2","")
+        p2_amount = split_pay.get("amount2",0)
+        split_note = f"""
+        <tr style='border-top:1px dashed #d1fae5'>
+          <td colspan='2' style='color:#059669;font-size:11px;padding:3px 8px'>Split: {p1_method}</td>
+          <td colspan='2' style='text-align:right;color:#059669;font-size:11px;padding:3px 8px'>₦{p1_amount:,.0f}</td>
+        </tr>
+        <tr>
+          <td colspan='2' style='color:#059669;font-size:11px;padding:3px 8px'>Split: {p2_method}</td>
+          <td colspan='2' style='text-align:right;color:#059669;font-size:11px;padding:3px 8px'>₦{p2_amount:,.0f}</td>
+        </tr>"""
+
+    phone_line = f"<br><span style='font-size:11px;color:#6b7280'>📱 {phone}</span>" if phone else ""
+    note_line  = f"<p style='font-size:11px;color:#6b7280;margin:4px 0'>Note: {note}</p>" if note else ""
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset='utf-8'>
+<title>Kokari Receipt #{receipt_no}</title>
+<style>
+  * {{ box-sizing: border-box; margin:0; padding:0; }}
+  body {{ font-family:'Segoe UI',Arial,sans-serif; background:#f3f4f6; display:flex;
+          justify-content:center; padding:30px 10px; }}
+  .receipt {{ background:white; width:380px; border-radius:12px;
+              box-shadow:0 4px 24px rgba(0,0,0,.12); overflow:hidden; }}
+  .header {{ background:linear-gradient(135deg,#1d4ed8,#2563eb); color:white;
+             text-align:center; padding:24px 20px 20px; }}
+  .header h1 {{ font-size:22px; letter-spacing:.5px; }}
+  .header .sub {{ font-size:12px; opacity:.85; margin-top:4px; }}
+  .meta {{ padding:14px 20px; border-bottom:1px dashed #e5e7eb; font-size:12px; color:#374151; }}
+  .meta-row {{ display:flex; justify-content:space-between; margin-bottom:4px; }}
+  .meta-row span:first-child {{ color:#6b7280; }}
+  .items {{ width:100%; border-collapse:collapse; font-size:13px; }}
+  .items thead tr {{ background:#f9fafb; }}
+  .items th {{ padding:8px; text-align:left; font-size:11px; color:#6b7280;
+               font-weight:600; text-transform:uppercase; letter-spacing:.5px; }}
+  .items th:nth-child(2) {{ text-align:center; }}
+  .items th:last-child {{ text-align:right; }}
+  .items td {{ padding:7px 8px; border-bottom:1px solid #f3f4f6; }}
+  .totals {{ padding:0 0 0 0; }}
+  .grand {{ background:#1d4ed8; color:white; display:flex; justify-content:space-between;
+            padding:14px 20px; font-size:16px; font-weight:700; margin-top:4px; }}
+  .payment-badge {{ background:#ecfdf5; color:#059669; font-size:12px; font-weight:600;
+                   padding:6px 14px; border-radius:20px; display:inline-block; margin:12px 0 4px; }}
+  .footer {{ text-align:center; padding:16px 20px 20px; font-size:11px; color:#9ca3af; }}
+  .status-badge {{ display:inline-block; padding:2px 10px; border-radius:10px; font-size:11px;
+                   font-weight:600; background:#d1fae5; color:#065f46; }}
+  @media print {{ body {{ background:white; padding:0; }} .receipt {{ box-shadow:none; border-radius:0; width:100%; }} }}
+</style>
+</head>
+<body>
+<div class='receipt'>
+  <div class='header'>
+    <h1>☕ Kokari Cafe</h1>
+    <div class='sub'>Official Receipt</div>
+  </div>
+  <div class='meta'>
+    <div class='meta-row'><span>Receipt No.</span><span><strong>#{receipt_no}</strong></span></div>
+    <div class='meta-row'><span>Date</span><span>{order_date}</span></div>
+    <div class='meta-row'><span>Customer</span><span><strong>{customer}</strong>{phone_line}</span></div>
+    <div class='meta-row'><span>Order Type</span><span>{order_type}</span></div>
+    <div class='meta-row'><span>Payment</span><span>{payment}</span></div>
+    <div class='meta-row'><span>Status</span><span><span class='status-badge'>{status}</span></span></div>
+  </div>
+  {note_line}
+  <div style='padding:0'>
+    <table class='items'>
+      <thead><tr>
+        <th>Item</th><th style='text-align:center'>Qty</th>
+        <th style='text-align:right'>Price</th><th style='text-align:right'>Total</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+      <tfoot class='totals'>
+        {vat_row}
+        <tr style='border-top:2px solid #e5e7eb'>
+          <td colspan='3' style='text-align:right;padding:6px 8px;font-weight:600'>
+            {'VAT Inclusive Total' if apply_vat else 'Total'}</td>
+          <td style='text-align:right;padding:6px 8px;font-weight:700;font-size:15px'>
+            ₦{grand_total:,.0f}</td>
+        </tr>
+        {split_note}
+      </tfoot>
+    </table>
+  </div>
+  <div class='grand'>
+    <span>GRAND TOTAL</span>
+    <span>₦{grand_total:,.0f}</span>
+  </div>
+  <div style='text-align:center;padding:14px 20px 6px'>
+    <span class='payment-badge'>✅ {payment}</span>
+    {'<br><span style="font-size:11px;color:#6b7280">' + note + '</span>' if note else ''}
+  </div>
+  <div class='footer'>
+    Thank you for visiting Kokari Cafe! 🙏<br>
+    <span style='font-size:10px'>Generated {date.today()} · Kokari Cafe POS v2.1</span>
+  </div>
+</div>
+<div style='text-align:center;margin-top:20px'>
+  <button onclick='window.print()' style='background:#2563eb;color:white;border:none;
+    padding:10px 28px;border-radius:8px;font-size:14px;cursor:pointer;font-weight:600'>
+    🖨️ Print Receipt / Save PDF
+  </button>
+</div>
+</body></html>"""
+
+
+def receipt_download_button(html, receipt_no):
+    b64 = base64.b64encode(html.encode()).decode()
+    st.markdown(
+        f'<a href="data:text/html;base64,{b64}" download="Kokari_Receipt_{receipt_no}.html" '
+        f'style="display:inline-block;background:#2563eb;color:white;padding:10px 24px;'
+        f'border-radius:8px;text-decoration:none;font-size:14px;font-weight:700;'
+        f'letter-spacing:.3px;">🧾 Download Receipt</a>',
+        unsafe_allow_html=True)
+    st.caption("Open in browser → Ctrl+P → Save as PDF for a clean printable receipt")
+
+
+# ─────────────────────────────────────────────────────────────────
 # LOGIN
 # ─────────────────────────────────────────────────────────────────
 def login_screen():
@@ -846,6 +994,285 @@ def login_screen():
 
 
 # ─────────────────────────────────────────────────────────────────
+# RECEIPT BUILDER  (shared by admin Manual Entry + attendant view)
+# ─────────────────────────────────────────────────────────────────
+def _get_next_receipt_no():
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT MAX(id) FROM orders").fetchone()
+        return (row[0] or 0) + 1
+    finally:
+        conn.close()
+
+
+def _render_receipt_builder(container, prods_df, role):
+    """Full receipt builder. Role='attendant' hides COGS/margin columns."""
+    show_margins = (role != "attendant")
+
+    with container:
+        st.markdown("### 🧾 Order Receipt Builder")
+        st.caption("Build an order, preview the receipt, then save and download.")
+
+        if "receipt_items" not in st.session_state:
+            st.session_state["receipt_items"] = []
+
+        customers_df = load_customers()
+        cust_names   = ["Walk-in"] + (customers_df["name"].tolist() if not customers_df.empty else [])
+
+        # ── Step 1: Order Header ────────────────────────────────
+        st.markdown("#### 1️⃣ Order Details")
+        with st.form("receipt_header_form"):
+            h1,h2 = st.columns(2)
+            r_date  = h1.date_input("Date", value=date.today())
+            r_cust  = h2.selectbox("Customer", cust_names)
+
+            h3,h4 = st.columns(2)
+            r_cust_custom = h3.text_input("Or type new customer name", placeholder="Type to add new…")
+            r_phone       = h4.text_input("Phone", placeholder="08012345678")
+
+            h5,h6,h7 = st.columns(3)
+            r_otype  = h5.selectbox("Order Type",     ["Dine-in","Take-out","Delivery","B2B"])
+            r_pay    = h6.selectbox("Payment Method", PAYMENT_METHODS)
+            r_status = h7.selectbox("Status",         ORDER_STATUSES)
+
+            h8,h9 = st.columns(2)
+            r_vat  = h8.checkbox("Apply VAT (7.5%)", value=False)
+            r_split= h9.checkbox("Split Payment",     value=False)
+
+            r_note = st.text_input("Order Note (optional)")
+
+            split_cols = st.columns(2) if r_split else (None, None)
+            if r_split:
+                r_pay2     = split_cols[0].selectbox("2nd Payment Method",
+                             [m for m in PAYMENT_METHODS if m != r_pay], key="sp2method")
+                r_pay2_amt = split_cols[1].number_input("2nd Payment Amount (₦)",
+                             min_value=0.0, step=100.0, key="sp2amt")
+
+            hdr_btn = st.form_submit_button("✅ Set Order Details", type="primary", use_container_width=True)
+
+        if hdr_btn:
+            customer_final = r_cust_custom.strip() if r_cust_custom.strip() else r_cust
+            split_data     = None
+            if r_split:
+                sp2_method = st.session_state.get("sp2method", PAYMENT_METHODS[0])
+                sp2_amt    = st.session_state.get("sp2amt", 0)
+                split_data = {"method1": r_pay, "amount1": 0,  # amount1 filled at save time
+                              "method2": sp2_method, "amount2": sp2_amt}
+            st.session_state["receipt_header"] = {
+                "date": r_date, "customer": customer_final,
+                "phone": phone_norm(r_phone), "order_type": r_otype,
+                "payment": r_pay, "status": r_status,
+                "apply_vat": r_vat, "split": split_data, "note": r_note}
+            st.session_state["receipt_items"] = []
+            st.session_state.pop("last_receipt", None)
+            st.success(f"Order for **{customer_final}** started — add products below.")
+
+        # ── Step 2: Add Products ────────────────────────────────
+        if "receipt_header" in st.session_state:
+            hdr = st.session_state["receipt_header"]
+            phone_d = f" · 📱{hdr['phone']}" if hdr.get("phone") else ""
+            vat_d   = " · VAT 7.5%" if hdr.get("apply_vat") else ""
+            split_d = " · Split Pay" if hdr.get("split") else ""
+            st.markdown(
+                f"**📋** `{hdr['customer']}`{phone_d} · `{hdr['date']}` · "
+                f"`{hdr['order_type']}` · `{hdr['payment']}`{vat_d}{split_d}")
+
+            st.markdown("#### 2️⃣ Add Products")
+            prod_names  = prods_df["name"].tolist()
+            prod_ids    = prods_df["id"].tolist()
+            prod_chans  = prods_df["channel"].tolist()
+            prod_ratios = prods_df["cost_ratio"].tolist()
+            prod_prices = prods_df["default_price"].tolist()
+            prod_labels = [f"{prod_names[i]}  [{prod_chans[i]}]  ·  {fmt(prod_prices[i])}"
+                           for i in range(len(prod_names))]
+
+            with st.form("receipt_add_item", clear_on_submit=True):
+                ai1,ai2,ai3 = st.columns([3,1,1])
+                sel_label = ai1.selectbox("Product", prod_labels if prod_labels else ["No products"])
+                sel_i     = prod_labels.index(sel_label) if sel_label in prod_labels else 0
+                ai_qty    = ai2.number_input("Qty",   min_value=0.0, step=0.5,   value=1.0)
+                def_price = float(prod_prices[sel_i]) if prod_prices else 0.0
+                ai_price  = ai3.number_input("Price (₦)", min_value=0.0, step=100.0, value=def_price)
+                add_btn   = st.form_submit_button("➕ Add Item", type="primary", use_container_width=True)
+
+            if add_btn and ai_qty > 0 and prod_names:
+                ratio = prod_ratios[sel_i]
+                st.session_state["receipt_items"].append({
+                    "product_id":   prod_ids[sel_i],
+                    "product_name": prod_names[sel_i],
+                    "channel":      prod_chans[sel_i],
+                    "category":     prod_chans[sel_i],
+                    "qty":          ai_qty,
+                    "unit_price":   ai_price,
+                    "total_price":  round(ai_qty * ai_price),
+                    "cost_ratio":   ratio,
+                    "unit_cogs":    round(ai_price * ratio),
+                    "total_cogs":   round(ai_qty * ai_price * ratio),
+                })
+
+            # ── Step 3: Receipt Preview ─────────────────────────
+            r_items = st.session_state["receipt_items"]
+            if r_items:
+                st.markdown("#### 3️⃣ Receipt Preview")
+
+                # Live receipt layout
+                subtotal   = sum(i["total_price"] for i in r_items)
+                vat_amount = round(subtotal * 0.075) if hdr.get("apply_vat") else 0
+                grand_total= subtotal + vat_amount
+
+                # Update split amount1
+                if hdr.get("split"):
+                    hdr["split"]["amount1"] = grand_total - hdr["split"].get("amount2", 0)
+
+                # Receipt card
+                receipt_card = f"""
+<div style='background:white;border:1px solid #e5e7eb;border-radius:12px;max-width:420px;
+            margin:0 auto;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08)'>
+  <div style='background:linear-gradient(135deg,#1d4ed8,#2563eb);color:white;
+              text-align:center;padding:20px 16px 16px'>
+    <div style='font-size:20px;font-weight:700;letter-spacing:.5px'>☕ Kokari Cafe</div>
+    <div style='font-size:11px;opacity:.8;margin-top:2px'>Official Receipt · {hdr["date"]}</div>
+  </div>
+  <div style='padding:12px 16px;border-bottom:1px dashed #e5e7eb;font-size:12px;color:#374151'>
+    <div style='display:flex;justify-content:space-between;margin-bottom:3px'>
+      <span style='color:#9ca3af'>Customer</span><span><b>{hdr["customer"]}</b></span></div>
+    <div style='display:flex;justify-content:space-between;margin-bottom:3px'>
+      <span style='color:#9ca3af'>Order Type</span><span>{hdr["order_type"]}</span></div>
+    <div style='display:flex;justify-content:space-between'>
+      <span style='color:#9ca3af'>Payment</span><span>{hdr["payment"]}</span></div>
+  </div>
+  <table style='width:100%;border-collapse:collapse;font-size:12px'>
+    <thead><tr style='background:#f9fafb'>
+      <th style='padding:6px 12px;text-align:left;color:#6b7280;font-size:10px;text-transform:uppercase'>Item</th>
+      <th style='padding:6px 8px;text-align:center;color:#6b7280;font-size:10px'>Qty</th>
+      <th style='padding:6px 8px;text-align:right;color:#6b7280;font-size:10px'>Price</th>
+      <th style='padding:6px 12px;text-align:right;color:#6b7280;font-size:10px'>Total</th>
+    </tr></thead>
+    <tbody>"""
+
+                for it in r_items:
+                    receipt_card += (
+                        f"<tr style='border-bottom:1px solid #f3f4f6'>"
+                        f"<td style='padding:6px 12px'>{it['product_name']}</td>"
+                        f"<td style='padding:6px 8px;text-align:center'>{it['qty']}</td>"
+                        f"<td style='padding:6px 8px;text-align:right'>₦{it['unit_price']:,.0f}</td>"
+                        f"<td style='padding:6px 12px;text-align:right'>₦{it['total_price']:,.0f}</td>"
+                        f"</tr>")
+
+                if hdr.get("apply_vat"):
+                    receipt_card += (
+                        f"<tr style='border-top:1px solid #e5e7eb'>"
+                        f"<td colspan='3' style='padding:5px 12px;text-align:right;color:#6b7280'>Subtotal</td>"
+                        f"<td style='padding:5px 12px;text-align:right'>₦{subtotal:,.0f}</td></tr>"
+                        f"<tr><td colspan='3' style='padding:5px 12px;text-align:right;color:#6b7280'>VAT 7.5%</td>"
+                        f"<td style='padding:5px 12px;text-align:right'>₦{vat_amount:,.0f}</td></tr>")
+
+                receipt_card += f"""
+    </tbody>
+  </table>
+  <div style='background:#1d4ed8;color:white;display:flex;justify-content:space-between;
+              padding:12px 16px;font-size:16px;font-weight:700'>
+    <span>TOTAL</span><span>₦{grand_total:,.0f}</span>
+  </div>
+  <div style='text-align:center;padding:12px;font-size:11px;color:#9ca3af'>
+    Thank you for visiting Kokari Cafe! 🙏
+  </div>
+</div>"""
+
+                st.markdown(receipt_card, unsafe_allow_html=True)
+                st.markdown("")  # spacer
+
+                # Summary metrics
+                if show_margins:
+                    tot_cogs = sum(i["total_cogs"] for i in r_items)
+                    gp_val   = subtotal - tot_cogs
+                    sc1,sc2,sc3,sc4,sc5 = st.columns(5)
+                    sc1.metric("Subtotal",    fmt(subtotal))
+                    sc2.metric("VAT",         fmt(vat_amount))
+                    sc3.metric("Grand Total", fmt(grand_total))
+                    sc4.metric("Est. COGS",   fmt(tot_cogs))
+                    sc5.metric("GP",          fmt(gp_val))
+                else:
+                    sc1,sc2,sc3 = st.columns(3)
+                    sc1.metric("Subtotal",    fmt(subtotal))
+                    sc2.metric("VAT",         fmt(vat_amount))
+                    sc3.metric("Grand Total", fmt(grand_total))
+
+                # Remove item
+                rem_opts = [f"{i+1}. {r_items[i]['product_name']} x{r_items[i]['qty']}" for i in range(len(r_items))]
+                rm1,rm2 = st.columns([3,1])
+                rem_sel = rm1.selectbox("Remove item", rem_opts, label_visibility="collapsed")
+                if rm2.button("Remove ❌"):
+                    st.session_state["receipt_items"].pop(rem_opts.index(rem_sel)); st.rerun()
+
+                st.divider()
+
+                # Save & Download buttons
+                rc1,rc2,rc3 = st.columns(3)
+                with rc1:
+                    if st.button("💾 Save Order", type="primary", use_container_width=True):
+                        receipt_no = _get_next_receipt_no()
+                        split_info = hdr.get("split")
+                        pay_note   = hdr["note"]
+                        if split_info:
+                            pay_note = (f"Split: {split_info['method1']} ₦{split_info['amount1']:,.0f} + "
+                                        f"{split_info['method2']} ₦{split_info['amount2']:,.0f}. {pay_note}").strip()
+                        save_single_order(
+                            hdr["date"], hdr["customer"], hdr["order_type"],
+                            hdr["payment"], hdr["status"], grand_total, pay_note,
+                            st.session_state["receipt_items"], hdr.get("phone",""))
+                        # Build receipt HTML for download
+                        html_receipt = generate_receipt_html(
+                            hdr["date"], hdr["customer"], hdr.get("phone",""),
+                            hdr["order_type"], hdr["payment"], hdr["status"],
+                            hdr["note"], st.session_state["receipt_items"],
+                            subtotal, vat_amount, grand_total,
+                            hdr.get("apply_vat"), hdr.get("split"), receipt_no)
+                        st.session_state["last_receipt"] = (html_receipt, receipt_no)
+                        st.session_state.pop("receipt_header", None)
+                        st.session_state["receipt_items"] = []
+                        st.success(f"✅ Order #{receipt_no} saved!"); st.rerun()
+
+                with rc2:
+                    if st.button("🗑️ Clear Items", use_container_width=True):
+                        st.session_state["receipt_items"] = []; st.rerun()
+                with rc3:
+                    if st.button("❌ Cancel Order", use_container_width=True):
+                        st.session_state.pop("receipt_header", None)
+                        st.session_state["receipt_items"] = []
+                        st.session_state.pop("last_receipt", None)
+                        st.rerun()
+            else:
+                st.info("No items yet. Select a product above and click ➕ Add Item.")
+
+        # ── Last receipt download ───────────────────────────────
+        if "last_receipt" in st.session_state:
+            html_r, rec_no = st.session_state["last_receipt"]
+            st.success(f"✅ Order #{rec_no} saved! Download the receipt below.")
+            receipt_download_button(html_r, rec_no)
+
+
+def _render_customers_readonly():
+    """Read-only customer list for attendant role."""
+    st.markdown("### 👤 Customer List")
+    st.caption("Read-only view — contact admin to edit customer details.")
+    customers_df = load_customers()
+    if not customers_df.empty:
+        cust_search = st.text_input("🔍 Search", placeholder="Name or phone…")
+        view = customers_df.copy()
+        if cust_search:
+            mask = (view["name"].str.contains(cust_search, case=False, na=False) |
+                    view["phone"].fillna("").str.contains(cust_search, na=False))
+            view = view[mask]
+        disp_cols = [c for c in ["name","phone","email","note"] if c in view.columns]
+        st.dataframe(view[disp_cols].rename(columns={"name":"Customer","phone":"Phone","email":"Email","note":"Note"}),
+                     use_container_width=True, hide_index=True)
+        st.caption(f"{len(customers_df)} customers on record.")
+    else:
+        st.info("No customers yet.")
+
+
+# ─────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────
 def main():
@@ -856,44 +1283,55 @@ def main():
     username = st.session_state["username"]
     role     = st.session_state["role"]
 
+    is_attendant = (role == "attendant")
+
     # ── SIDEBAR ──────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("## ☕ Kokari Cafe")
-        st.caption(f"**{username}** · {role}")
+        role_badge = "🟡 Attendant" if is_attendant else "🟢 Admin"
+        st.caption(f"**{username}** · {role_badge}")
         if st.button("Sign Out", use_container_width=True):
-            for k in ["logged_in","username","role","parsed_orders","manual_items","order_header"]:
+            for k in ["logged_in","username","role","parsed_orders","manual_items","order_header",
+                      "receipt_items","receipt_header","last_receipt"]:
                 st.session_state.pop(k, None)
             st.rerun()
         st.divider()
 
-        st.markdown("### 📅 Report Period")
-        PRESETS = ["Today","Yesterday","This Week","Last Week","This Month","Last Month",
-                   "This Quarter","This Year","Last 7 Days","Last 30 Days","Last 90 Days","All Time","Custom"]
-        preset = st.selectbox("Period", PRESETS, index=6)
-        if preset == "Custom":
-            c1,c2 = st.columns(2)
-            from_date = c1.date_input("From", value=date(2026,2,9))
-            to_date   = c2.date_input("To",   value=date.today())
+        if is_attendant:
+            st.info("**Attendant Mode**\n\nYou have access to:\n- ✍️ New Orders\n- 👤 Customers (read-only)\n\nContact admin for full access.")
+            # Attendant still needs date for orders — use today only
+            from_date    = date.today()
+            to_date      = date.today()
+            period_label = "Today"
         else:
-            from_date, to_date = get_period_dates(preset)
-            st.caption(f"📆 {from_date} → {to_date}")
-        period_label = preset
+            st.markdown("### 📅 Report Period")
+            PRESETS = ["Today","Yesterday","This Week","Last Week","This Month","Last Month",
+                       "This Quarter","This Year","Last 7 Days","Last 30 Days","Last 90 Days","All Time","Custom"]
+            preset = st.selectbox("Period", PRESETS, index=6)
+            if preset == "Custom":
+                c1,c2 = st.columns(2)
+                from_date = c1.date_input("From", value=date(2026,2,9))
+                to_date   = c2.date_input("To",   value=date.today())
+            else:
+                from_date, to_date = get_period_dates(preset)
+                st.caption(f"📆 {from_date} → {to_date}")
+            period_label = preset
 
-        st.divider()
-        st.markdown("### ⚡ Quick Expense")
-        exp_cats_sidebar = load_exp_cats()
-        with st.form("qexp", clear_on_submit=True):
-            qe_cat  = st.selectbox("Category", exp_cats_sidebar if exp_cats_sidebar else ["Miscellaneous"])
-            qe_name = st.text_input("Description")
-            qe_amt  = st.number_input("Amount (₦)", min_value=0, step=100)
-            qe_date = st.date_input("Date", value=date.today())
-            qe_note = st.text_input("Note (optional)")
-            if st.form_submit_button("Save Expense", use_container_width=True, type="primary"):
-                if qe_amt > 0 and qe_name.strip():
-                    add_expense(qe_date, qe_name.strip(), qe_cat, qe_amt, qe_note)
-                    st.success("✅ Saved!")
-                else:
-                    st.error("Fill description & amount.")
+            st.divider()
+            st.markdown("### ⚡ Quick Expense")
+            exp_cats_sidebar = load_exp_cats()
+            with st.form("qexp", clear_on_submit=True):
+                qe_cat  = st.selectbox("Category", exp_cats_sidebar if exp_cats_sidebar else ["Miscellaneous"])
+                qe_name = st.text_input("Description")
+                qe_amt  = st.number_input("Amount (₦)", min_value=0, step=100)
+                qe_date = st.date_input("Date", value=date.today())
+                qe_note = st.text_input("Note (optional)")
+                if st.form_submit_button("Save Expense", use_container_width=True, type="primary"):
+                    if qe_amt > 0 and qe_name.strip():
+                        add_expense(qe_date, qe_name.strip(), qe_cat, qe_amt, qe_note)
+                        st.success("✅ Saved!")
+                    else:
+                        st.error("Fill description & amount.")
 
     # ── LOAD DATA ─────────────────────────────────────────────────
     orders_df = load_orders(from_date, to_date)
@@ -902,6 +1340,17 @@ def main():
     kpi       = compute_kpis(orders_df, items_df, exp_df)
     prods_df  = load_products()
 
+    # ── ATTENDANT VIEW — restricted single-tab layout ─────────────
+    if is_attendant:
+        st.title("☕ Kokari Cafe · Order Entry")
+        st.caption(f"Logged in as **{username}** (Attendant) · {date.today()}")
+        att_tabs = st.tabs(["✍️ New Order", "👤 Customers"])
+        _render_receipt_builder(att_tabs[0], prods_df, role)
+        with att_tabs[1]:
+            _render_customers_readonly()
+        st.stop()
+
+    # ── ADMIN FULL VIEW ───────────────────────────────────────────
     st.title("☕ Kokari Cafe · Financial Dashboard")
     st.caption(f"**{period_label}** · {from_date} → {to_date} · {kpi['days']} day(s) · "
                f"{kpi['orders']} orders · Avg: {fmt(kpi['avg_order'])}")
@@ -1099,129 +1548,9 @@ def main():
                     st.session_state.pop("parsed_orders",None); st.rerun()
 
     # ══════════════════════════════════════════════════════════════
-    # TAB 2 — MANUAL ENTRY  (bugs fixed)
+    # TAB 2 — MANUAL ENTRY / RECEIPT BUILDER
     # ══════════════════════════════════════════════════════════════
-    with tabs[2]:
-        st.markdown("### ✍️ Manual Order Entry")
-        st.caption("Build a detailed order step-by-step with full product review before saving.")
-
-        if "manual_items" not in st.session_state:
-            st.session_state["manual_items"] = []
-
-        # Step 1 — header
-        st.markdown("#### 1️⃣ Order Details")
-        with st.form("order_header"):
-            h1,h2 = st.columns(2)
-            m_date  = h1.date_input("Order Date", value=date.today())
-            m_cust  = h2.text_input("Customer Name", value="Walk-in")
-            h3,h4,h5 = st.columns(3)
-            m_otype  = h3.selectbox("Order Type",     ORDER_TYPES)
-            m_pay    = h4.selectbox("Payment Method", PAYMENT_METHODS)
-            m_status = h5.selectbox("Status",         ORDER_STATUSES)
-            m_phone  = st.text_input("Customer Phone (optional)", placeholder="08012345678")
-            m_note   = st.text_input("Order Note (optional)")
-            hdr_btn  = st.form_submit_button("✅ Set Order Header", type="primary", use_container_width=True)
-
-        if hdr_btn:
-            st.session_state["order_header"] = {
-                "date":m_date,"customer":m_cust,"order_type":m_otype,
-                "payment":m_pay,"status":m_status,
-                "phone":phone_norm(m_phone),"note":m_note}
-            st.success("Header saved — now add products below.")
-
-        # Step 2 — add items
-        if "order_header" in st.session_state:
-            hdr = st.session_state["order_header"]
-            phone_d = f" · 📱{hdr['phone']}" if hdr.get("phone") else ""
-            st.markdown(f"**📋 Order:** `{hdr['customer']}`{phone_d} · `{hdr['date']}` · "
-                        f"`{hdr['order_type']}` · `{hdr['payment']}` · `{hdr['status']}`")
-
-            st.markdown("#### 2️⃣ Add Products")
-
-            # Build display labels BEFORE the form (avoids closure/lambda bug with range())
-            prod_names  = prods_df["name"].tolist()
-            prod_ids    = prods_df["id"].tolist()
-            prod_chans  = prods_df["channel"].tolist()
-            prod_ratios = prods_df["cost_ratio"].tolist()
-            prod_prices = prods_df["default_price"].tolist()
-            # Use plain string labels — no lambda needed, no range() selectbox
-            prod_labels = [f"{prod_names[i]}  [{prod_chans[i]}]  ·  {fmt(prod_prices[i])}"
-                           for i in range(len(prod_names))]
-
-            with st.form("add_item", clear_on_submit=True):
-                ai1,ai2,ai3 = st.columns([3,1,1])
-                sel_label  = ai1.selectbox("Product", prod_labels if prod_labels else ["No products"])
-                sel_i      = prod_labels.index(sel_label) if sel_label in prod_labels else 0
-                ai_qty     = ai2.number_input("Qty",            min_value=0.0, step=0.5,   value=1.0)
-                default_p  = float(prod_prices[sel_i]) if prod_prices else 0.0
-                ai_price   = ai3.number_input("Unit Price (₦)", min_value=0.0, step=100.0, value=default_p)
-                st.caption(f"Channel: **{prod_chans[sel_i] if prod_chans else '—'}** · "
-                           f"Cost ratio: **{prod_ratios[sel_i]:.0%} if prod_ratios else '—'** · "
-                           f"Default: **{fmt(prod_prices[sel_i]) if prod_prices else '₦0'}**")
-                add_btn = st.form_submit_button("➕ Add to Order", type="primary", use_container_width=True)
-
-            if add_btn and ai_qty > 0 and prod_names:
-                ratio = prod_ratios[sel_i]
-                st.session_state["manual_items"].append({
-                    "product_id":   prod_ids[sel_i],
-                    "product_name": prod_names[sel_i],
-                    "channel":      prod_chans[sel_i],
-                    "category":     prod_chans[sel_i],
-                    "qty":          ai_qty,
-                    "unit_price":   ai_price,
-                    "total_price":  round(ai_qty*ai_price),
-                    "cost_ratio":   ratio,
-                    "unit_cogs":    round(ai_price*ratio),
-                    "total_cogs":   round(ai_qty*ai_price*ratio),
-                })
-
-            # Step 3 — review & save
-            items = st.session_state["manual_items"]
-            if items:
-                st.markdown("#### 3️⃣ Order Review")
-                review_rows = [{
-                    "#":idx+1,"Product":it["product_name"],"Channel":it["channel"],
-                    "Qty":it["qty"],"Unit Price":f"₦{it['unit_price']:,.0f}",
-                    "Total":f"₦{it['total_price']:,.0f}","Est. COGS":f"₦{it['total_cogs']:,.0f}",
-                    "Margin":f"{safe_pct(it['total_price']-it['total_cogs'],it['total_price'])}%",
-                } for idx,it in enumerate(items)]
-                st.dataframe(pd.DataFrame(review_rows), use_container_width=True, hide_index=True)
-
-                total   = sum(i["total_price"] for i in items)
-                tot_cog = sum(i["total_cogs"]  for i in items)
-                gp_val  = total - tot_cog
-                mc1,mc2,mc3,mc4 = st.columns(4)
-                mc1.metric("Order Total",  fmt(total))
-                mc2.metric("Est. COGS",    fmt(tot_cog))
-                mc3.metric("Gross Profit", fmt(gp_val))
-                mc4.metric("GP Margin",    f"{safe_pct(gp_val,total)}%")
-
-                # Remove item selector
-                rem_opts = [f"{i+1}. {items[i]['product_name']} x{items[i]['qty']}" for i in range(len(items))]
-                rm1,rm2 = st.columns([3,1])
-                rem_sel = rm1.selectbox("Remove item", rem_opts, label_visibility="collapsed")
-                if rm2.button("Remove ❌"):
-                    st.session_state["manual_items"].pop(rem_opts.index(rem_sel)); st.rerun()
-
-                rc1,rc2,rc3 = st.columns(3)
-                with rc1:
-                    if st.button("💾 Save Order", type="primary", use_container_width=True):
-                        save_single_order(
-                            hdr["date"],hdr["customer"],hdr["order_type"],
-                            hdr["payment"],hdr["status"],total,hdr["note"],
-                            st.session_state["manual_items"],hdr.get("phone",""))
-                        st.session_state.pop("order_header",None)
-                        st.session_state["manual_items"] = []
-                        st.success("✅ Order saved!"); st.rerun()
-                with rc2:
-                    if st.button("🗑️ Clear Items", use_container_width=True):
-                        st.session_state["manual_items"] = []; st.rerun()
-                with rc3:
-                    if st.button("❌ Cancel Order", use_container_width=True):
-                        st.session_state.pop("order_header",None)
-                        st.session_state["manual_items"] = []; st.rerun()
-            else:
-                st.info("No items yet. Select a product above and click ➕ Add to Order.")
+    _render_receipt_builder(tabs[2], prods_df, role)
 
     # ══════════════════════════════════════════════════════════════
     # TAB 3 — ORDERS
@@ -1709,7 +2038,7 @@ def main():
             st.divider()
             st.markdown("#### ℹ️ System Info")
             st.info(f"**User:** {username}  \n**Role:** {role}  \n**DB:** {DB_PATH}  \n"
-                    f"**v2.1**  \nDefault: admin / kokari2026")
+                    f"**v2.1**  \nAdmin: admin / kokari2026  \nAttendant: attendant / kokari123")
 
             st.markdown("#### 🔗 WhatsApp Product Aliases")
             st.caption("Keywords in WhatsApp messages → product + sales category")
