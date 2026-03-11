@@ -12,7 +12,10 @@ import sqlite3
 import hashlib
 import base64
 import re
-from datetime import date, timedelta
+import os
+import io
+import shutil
+from datetime import date, timedelta, datetime
 
 import streamlit as st
 import pandas as pd
@@ -24,7 +27,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-DB_PATH         = "kokari_cafe.db"
+# ─────────────────────────────────────────────────────────────
+# DB PATH — absolute so it survives working-dir changes on restart
+# ─────────────────────────────────────────────────────────────
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH     = os.path.join(_SCRIPT_DIR, "kokari_cafe.db")
 PAYMENT_METHODS = ["Opay", "Bank Transfer", "Cash", "POS", "Other"]
 ORDER_TYPES     = ["Dine-in", "Take-out", "Delivery"]
 ORDER_STATUSES  = ["Confirmed", "Pending", "Cancelled"]
@@ -84,7 +91,72 @@ def phone_norm(raw):
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # WAL mode: far more durable, survives crashes, allows concurrent reads
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+def db_exists_and_has_data():
+    """Return (exists:bool, order_count:int, db_size_kb:float)"""
+    if not os.path.exists(DB_PATH):
+        return False, 0, 0.0
+    try:
+        conn = get_conn()
+        count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        conn.close()
+        size_kb = os.path.getsize(DB_PATH) / 1024
+        return True, count, round(size_kb, 1)
+    except Exception:
+        return False, 0, 0.0
+
+
+def export_db_bytes():
+    """Return raw bytes of the SQLite DB file (safe offline copy)."""
+    if not os.path.exists(DB_PATH):
+        return None
+    # Use SQLite backup API for a consistent snapshot
+    src  = sqlite3.connect(DB_PATH)
+    buf  = io.BytesIO()
+    dst  = sqlite3.connect(":memory:")
+    src.backup(dst)
+    src.close()
+    # Write memory DB to bytes
+    tmp_path = DB_PATH + ".export_tmp"
+    dst_file = sqlite3.connect(tmp_path)
+    dst.backup(dst_file)
+    dst_file.close()
+    dst.close()
+    with open(tmp_path, "rb") as f:
+        data = f.read()
+    os.remove(tmp_path)
+    return data
+
+
+def restore_db_from_bytes(data: bytes):
+    """Overwrite the current DB with uploaded bytes. Returns (ok, message)."""
+    try:
+        tmp_path = DB_PATH + ".restore_tmp"
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+        # Validate it's a real SQLite file with the right tables
+        test = sqlite3.connect(tmp_path)
+        tables = {r[0] for r in test.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        test.close()
+        required = {"orders", "order_items", "users", "products"}
+        missing  = required - tables
+        if missing:
+            os.remove(tmp_path)
+            return False, f"Invalid backup — missing tables: {missing}"
+        # Swap in
+        if os.path.exists(DB_PATH):
+            shutil.copy2(DB_PATH, DB_PATH + ".pre_restore_bak")
+        shutil.move(tmp_path, DB_PATH)
+        bust()
+        return True, "Database restored successfully."
+    except Exception as e:
+        return False, f"Restore failed: {e}"
 
 def init_db():
     conn = get_conn()
@@ -1422,6 +1494,24 @@ def _render_customers_readonly():
 # ─────────────────────────────────────────────────────────────────
 def main():
     init_db()
+
+    # ── DB HEALTH CHECK — runs every page load ────────────────────
+    db_ok, db_orders, db_size = db_exists_and_has_data()
+    if not db_ok:
+        st.error(
+            "⚠️ **Database not found!**  \n"
+            f"Expected at: `{DB_PATH}`  \n"
+            "If you're on Streamlit Community Cloud, the ephemeral filesystem was wiped during sleep.  \n"
+            "**Restore your data using the backup file from Settings → 💾 Backup & Restore.**"
+        )
+        st.info("A new empty database has been created. You can restore from backup below.")
+        # Still let user log in so they can restore
+    elif db_orders == 0:
+        st.warning(
+            "⚠️ **Database is empty** — this may mean the app restarted and lost data.  \n"
+            "Go to **Settings → 💾 Backup & Restore** to restore from your last backup."
+        )
+
     if not st.session_state.get("logged_in"):
         login_screen(); st.stop()
 
@@ -2181,8 +2271,15 @@ def main():
                         st.rerun()
             st.divider()
             st.markdown("#### ℹ️ System Info")
-            st.info(f"**User:** {username}  \n**Role:** {role}  \n**DB:** {DB_PATH}  \n"
-                    f"**v2.1**  \nAdmin: admin / kokari2026  \nAttendant: attendant / kokari123")
+            _, s_orders, s_size = db_exists_and_has_data()
+            st.info(f"**User:** {username}  \n**Role:** {role}  \n"
+                    f"**DB:** `{DB_PATH}`  \n"
+                    f"**Orders in DB:** {s_orders}  ·  **Size:** {s_size} KB  \n"
+                    f"**v2.2**  \nAdmin: admin / kokari2026  \nAttendant: attendant / kokari123")
+            st.warning(
+                "⚠️ **Remember to download a backup daily!**  \n"
+                "Go to **💾 Backup & Restore** section above → Download backup.  \n"
+                "Streamlit Cloud wipes data on sleep/restart.")
 
             st.markdown("#### 🔗 WhatsApp Product Aliases")
             st.caption("Keywords in WhatsApp messages → product + sales category")
@@ -2192,6 +2289,125 @@ def main():
                 pname = match.iloc[0]["name"] if not match.empty else pid
                 alias_rows.append({"Keyword":alias,"Maps to":pname,"Category":cat})
             st.dataframe(pd.DataFrame(alias_rows),use_container_width=True,hide_index=True,height=300)
+
+        # ── FULL-WIDTH: Backup & Restore ──────────────────────────
+        st.divider()
+        st.markdown("### 💾 Backup & Restore")
+        st.caption(
+            "**Why this matters:** Streamlit Community Cloud (and similar hosts) use an *ephemeral* "
+            "filesystem — the database file can be wiped when the app sleeps or redeploys. "
+            "Download a backup after every session and restore it whenever data disappears.")
+
+        db_ok, db_orders, db_size = db_exists_and_has_data()
+        bk1, bk2, bk3 = st.columns(3)
+        bk1.metric("DB Status",    "✅ Healthy" if db_ok else "❌ Missing")
+        bk2.metric("Total Orders", db_orders)
+        bk3.metric("DB Size",      f"{db_size} KB")
+
+        st.markdown("---")
+        dl_col, up_col = st.columns(2)
+
+        with dl_col:
+            st.markdown("#### ⬇️ Download Backup")
+            st.markdown(
+                "Download the full database file. **Do this after every shift / day.** "
+                "Keep the file safe — it contains all your orders, products, and settings.")
+            if db_ok:
+                db_bytes = export_db_bytes()
+                if db_bytes:
+                    ts = datetime.now().strftime("%Y%m%d_%H%M")
+                    st.download_button(
+                        label=f"⬇️ Download kokari_cafe_{ts}.db",
+                        data=db_bytes,
+                        file_name=f"kokari_cafe_backup_{ts}.db",
+                        mime="application/octet-stream",
+                        use_container_width=True,
+                        type="primary")
+                    st.caption(f"Backup size: {len(db_bytes)/1024:.1f} KB · {db_orders} orders")
+            else:
+                st.warning("No database to download yet.")
+
+            st.markdown("---")
+            st.markdown("**📋 Backup Schedule Reminder**")
+            st.info(
+                "✅ Download after each day's trading  \n"
+                "✅ Keep 7 days of rolling backups  \n"
+                "✅ Store in Google Drive or WhatsApp  \n"
+                "✅ Restore immediately if data disappears")
+
+        with up_col:
+            st.markdown("#### ⬆️ Restore from Backup")
+            st.markdown(
+                "Upload a previously downloaded `.db` backup file to restore all your data. "
+                "**This will replace the current database.** A pre-restore backup is kept automatically.")
+
+            st.warning("⚠️ Restoring will **overwrite** all current data. Only restore if data is missing or corrupted.")
+
+            uploaded = st.file_uploader(
+                "Upload backup file (.db)",
+                type=["db"],
+                help="Upload a kokari_cafe_backup_*.db file downloaded from this page")
+
+            if uploaded is not None:
+                file_bytes = uploaded.read()
+                file_size  = len(file_bytes) / 1024
+                st.info(f"📁 **{uploaded.name}** · {file_size:.1f} KB")
+
+                # Preview what's in the backup before restoring
+                try:
+                    tmp_preview = DB_PATH + ".preview_tmp"
+                    with open(tmp_preview, "wb") as f_tmp:
+                        f_tmp.write(file_bytes)
+                    preview_conn = sqlite3.connect(tmp_preview)
+                    preview_orders = preview_conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+                    preview_items  = preview_conn.execute("SELECT COUNT(*) FROM order_items").fetchone()[0]
+                    preview_prods  = preview_conn.execute("SELECT COUNT(*) FROM products WHERE active=1").fetchone()[0]
+                    preview_conn.close()
+                    os.remove(tmp_preview)
+                    st.success(
+                        f"✅ Valid backup detected:  \n"
+                        f"- **{preview_orders}** orders  \n"
+                        f"- **{preview_items}** order line items  \n"
+                        f"- **{preview_prods}** active products")
+                except Exception as e:
+                    st.error(f"Could not preview backup: {e}")
+                    preview_orders = 0
+
+                if st.button("🔄 Restore This Backup", type="primary", use_container_width=True):
+                    ok, msg = restore_db_from_bytes(file_bytes)
+                    if ok:
+                        st.success(f"✅ {msg} — {preview_orders} orders restored.")
+                        st.balloons()
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {msg}")
+
+        # Deployment guide
+        st.markdown("---")
+        with st.expander("📖 Permanent Fix: How to use a persistent database path"):
+            st.markdown("""
+**Root Cause:** Streamlit Community Cloud's filesystem is *ephemeral* — files are deleted when the app sleeps, redeploys, or restarts. This affects any SQLite database stored on the server.
+
+**Option 1 — Daily Backup Habit (Free, Easy)**
+Download a backup every evening. Restore after any restart. Takes 10 seconds.
+
+**Option 2 — Mount a Persistent Volume (Streamlit Teams/Enterprise)**
+In `secrets.toml`, set `DB_PATH` to a mounted volume path. Contact Streamlit support.
+
+**Option 3 — Move to a Hosted Database (Recommended for Production)**
+Replace SQLite with a hosted database like:
+- **Supabase** (free tier, PostgreSQL) — change `get_conn()` to use `psycopg2`
+- **PlanetScale** (free tier, MySQL)
+- **TiDB Serverless** (free tier, MySQL-compatible)
+- **Neon** (free tier, PostgreSQL)
+
+All of these persist data permanently regardless of app restarts.
+
+**Option 4 — Run Locally or on a VPS**
+Run `streamlit run dashboard.py` on a machine you control (laptop, Raspberry Pi, DigitalOcean Droplet). The DB lives on that machine's filesystem and persists forever.
+
+**Current DB Path:** `{}`
+            """.format(DB_PATH))
 
 
 if __name__ == "__main__":
