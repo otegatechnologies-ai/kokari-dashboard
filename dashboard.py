@@ -1,9 +1,10 @@
 """
-KOKARI CAFE FINANCIAL DASHBOARD — v2.1
+KOKARI CAFE FINANCIAL DASHBOARD — v2.2
 ========================================
 requirements.txt:
     streamlit
     pandas
+    openpyxl
 
 Run:  streamlit run dashboard.py
 """
@@ -1237,69 +1238,128 @@ def _render_receipt_builder(container, prods_df, role):
 
         st.divider()
 
-        # ── SECTION B: ADD PRODUCT (single form, clear_on_submit) ─
+        # ── SECTION B: ADD PRODUCT ───────────────────────────────
+        # Product selector lives OUTSIDE the form so its value
+        # drives the live price display before the user submits.
         st.markdown("#### ➕ Add Item to Order")
 
-        # Track the selected product to auto-populate price
-        if "rb_sel_prod_label" not in st.session_state:
-            st.session_state["rb_sel_prod_label"] = prod_labels[0] if prod_labels else ""
+        # Step 1: product picker + live price display (outside form)
+        if not prod_names:
+            st.warning("No active products found. Ask admin to add products first.")
+        else:
+            # Session key tracks which product is currently selected
+            if "rb_cur_prod_idx" not in st.session_state:
+                st.session_state["rb_cur_prod_idx"] = 0
 
-        with st.form("rb_add_item_form", clear_on_submit=True):
-            fi1, fi2, fi3 = st.columns([4, 2, 2])
+            # Selectbox outside form — updates immediately on change
+            sel_label = st.selectbox(
+                "Select Product",
+                prod_labels,
+                index=min(st.session_state["rb_cur_prod_idx"], len(prod_labels)-1),
+                key="rb_prod_outer_sel")
+            sel_i = prod_labels.index(sel_label) if sel_label in prod_labels else 0
+            st.session_state["rb_cur_prod_idx"] = sel_i   # persist selected index
 
-            sel_label = fi1.selectbox(
-                "Product",
-                prod_labels if prod_labels else ["No products — add products in Admin"],
-                key="rb_prod_sel_form")
-            sel_i     = prod_labels.index(sel_label) if sel_label in prod_labels else 0
+            live_price = float(prod_prices[sel_i])
+            live_ratio = float(prod_ratios[sel_i])
 
-            # Qty — whole integers only, no decimals
-            ai_qty = fi2.number_input("Qty", min_value=1, max_value=999,
-                                       step=1, value=1, format="%d")
+            # Live price hint shown immediately under the product selector
+            st.markdown(
+                f"<div style='background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;"
+                f"padding:8px 14px;margin:4px 0 10px 0;font-size:13px;color:#166534'>"
+                f"💰 <b>{prod_names[sel_i]}</b> &nbsp;·&nbsp; "
+                f"Unit Price: <b>₦{live_price:,.0f}</b> &nbsp;·&nbsp; "
+                f"Channel: {prod_chans[sel_i]}"
+                f"</div>",
+                unsafe_allow_html=True)
 
-            # Unit price: auto-filled from product default, admin can override
-            auto_price = float(prod_prices[sel_i]) if prod_prices else 0.0
-            if show_margins:
-                # Admin sees price field editable
-                ai_price = fi3.number_input("Unit Price (₦)",
-                                             min_value=0.0, step=50.0,
-                                             value=auto_price, format="%.0f")
-            else:
-                # Attendant sees price display only (read-only via disabled)
-                ai_price = fi3.number_input("Unit Price (₦)",
-                                             min_value=0.0, step=50.0,
-                                             value=auto_price, format="%.0f",
-                                             disabled=True)
+            # Step 2: qty form (small, just qty + submit)
+            with st.form("rb_add_item_form", clear_on_submit=True):
+                qc1, qc2, qc3 = st.columns([2, 2, 3])
+                ai_qty = qc1.number_input(
+                    "Quantity", min_value=1, max_value=999,
+                    step=1, value=1, format="%d")
 
-            add_btn = st.form_submit_button("➕ Add to Order",
-                                             type="primary", use_container_width=True)
+                # Price field: admin can edit, attendant sees it read-only
+                if show_margins:
+                    ai_price = qc2.number_input(
+                        "Unit Price (₦)", min_value=0.0,
+                        step=50.0, value=live_price, format="%.0f")
+                else:
+                    ai_price = qc2.number_input(
+                        "Unit Price (₦)", min_value=0.0,
+                        step=50.0, value=live_price, format="%.0f",
+                        disabled=True)
 
-        if add_btn and prod_names:
-            ratio = float(prod_ratios[sel_i])
-            tp    = int(ai_qty) * float(ai_price)
-            resolved_cust = cust_custom.strip() if cust_custom.strip() else cust_sel
-            st.session_state["rb_customer"] = resolved_cust
-            st.session_state["rb_items"].append({
-                "product_id":   str(prod_ids[sel_i]),
-                "product_name": str(prod_names[sel_i]),
-                "channel":      str(prod_chans[sel_i]),
-                "category":     str(prod_chans[sel_i]),
-                "qty":          int(ai_qty),
-                "unit_price":   float(ai_price),
-                "total_price":  float(round(tp)),
-                "cost_ratio":   ratio,
-                "unit_cogs":    float(round(float(ai_price) * ratio)),
-                "total_cogs":   float(round(tp * ratio)),
-            })
-            st.rerun()
+                # Live amount preview inside form (computed from form values)
+                preview_amt = int(ai_qty) * float(ai_price)
+                qc3.metric("Amount", f"₦{preview_amt:,.0f}")
+
+                add_btn = st.form_submit_button(
+                    "➕ Add to Order", type="primary", use_container_width=True)
+
+            if add_btn:
+                ratio = live_ratio
+                # Recalculate using the correct sel_i from outer selectbox
+                final_price = float(ai_price)
+                tp    = int(ai_qty) * final_price
+                resolved_cust = cust_custom.strip() if cust_custom.strip() else cust_sel
+                st.session_state["rb_customer"] = resolved_cust
+                st.session_state["rb_items"].append({
+                    "product_id":   str(prod_ids[sel_i]),
+                    "product_name": str(prod_names[sel_i]),
+                    "channel":      str(prod_chans[sel_i]),
+                    "category":     str(prod_chans[sel_i]),
+                    "qty":          int(ai_qty),
+                    "unit_price":   final_price,
+                    "total_price":  float(round(tp)),
+                    "cost_ratio":   ratio,
+                    "unit_cogs":    float(round(final_price * ratio)),
+                    "total_cogs":   float(round(tp * ratio)),
+                })
+                st.rerun()
+
+            # ── Running items table (always visible once items added) ─
+            r_items_preview = st.session_state.get("rb_items", [])
+            if r_items_preview:
+                st.markdown("**🛒 Items in this order:**")
+                tbl_rows = ""
+                for idx, it in enumerate(r_items_preview):
+                    tbl_rows += (
+                        f"<tr style='border-bottom:1px solid #f3f4f6'>"
+                        f"<td style='padding:6px 10px'>{idx+1}. {it['product_name']}</td>"
+                        f"<td style='padding:6px 8px;text-align:center'>{int(it['qty'])}</td>"
+                        f"<td style='padding:6px 8px;text-align:right'>₦{it['unit_price']:,.0f}</td>"
+                        f"<td style='padding:6px 10px;text-align:right;font-weight:600;color:#1d4ed8'>"
+                        f"₦{it['total_price']:,.0f}</td>"
+                        f"</tr>")
+                running_total = sum(float(i["total_price"]) for i in r_items_preview)
+                st.markdown(
+                    f"<table style='width:100%;border-collapse:collapse;font-size:13px;"
+                    f"background:white;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden'>"
+                    f"<thead><tr style='background:#f8fafc'>"
+                    f"<th style='padding:7px 10px;text-align:left;font-size:11px;color:#6b7280;"
+                    f"font-weight:600;text-transform:uppercase'>Product</th>"
+                    f"<th style='padding:7px 8px;text-align:center;font-size:11px;color:#6b7280;"
+                    f"font-weight:600;text-transform:uppercase'>Qty</th>"
+                    f"<th style='padding:7px 8px;text-align:right;font-size:11px;color:#6b7280;"
+                    f"font-weight:600;text-transform:uppercase'>Unit Price</th>"
+                    f"<th style='padding:7px 10px;text-align:right;font-size:11px;color:#6b7280;"
+                    f"font-weight:600;text-transform:uppercase'>Amount</th>"
+                    f"</tr></thead><tbody>{tbl_rows}</tbody>"
+                    f"<tfoot><tr style='background:#eff6ff;border-top:2px solid #bfdbfe'>"
+                    f"<td colspan='3' style='padding:8px 10px;font-weight:700;color:#1d4ed8'>"
+                    f"Running Total</td>"
+                    f"<td style='padding:8px 10px;text-align:right;font-weight:800;font-size:15px;"
+                    f"color:#1d4ed8'>₦{running_total:,.0f}</td>"
+                    f"</tr></tfoot></table>",
+                    unsafe_allow_html=True)
 
         # ── SECTION C: LIVE RECEIPT PREVIEW ─────────────────────
+        # This block is always computed from rb_items in session state
         r_items = st.session_state.get("rb_items", [])
 
         if r_items:
-            st.divider()
-            st.markdown("#### 🧾 Live Receipt Preview")
-
             subtotal    = sum(float(i["total_price"]) for i in r_items)
             vat_amount  = round(subtotal * 0.075) if st.session_state["rb_apply_vat"] else 0
             grand_total = subtotal + vat_amount
@@ -1307,105 +1367,138 @@ def _render_receipt_builder(container, prods_df, role):
                           if st.session_state["rb_split"] else 0.0
             split1_amt  = max(0.0, grand_total - split2_amt)
 
-            # ── Columns: receipt card left, controls right ───────
-            left, right = st.columns([5, 3])
+            phone_line  = (f"<br><span style='font-size:11px;color:#9ca3af'>"
+                           f"📱 {phone_norm(st.session_state['rb_phone'])}</span>"
+                           if st.session_state["rb_phone"] else "")
+            pay_display = (f"{st.session_state['rb_payment']} + {st.session_state['rb_payment2']}"
+                           if st.session_state["rb_split"] else st.session_state["rb_payment"])
 
-            with left:
-                # Build receipt HTML card
-                rows_html = ""
-                for it in r_items:
-                    rows_html += (
-                        f"<tr style='border-bottom:1px solid #f3f4f6'>"
-                        f"<td style='padding:7px 14px'>{it['product_name']}</td>"
-                        f"<td style='padding:7px 8px;text-align:center'>{int(it['qty'])}</td>"
-                        f"<td style='padding:7px 8px;text-align:right'>₦{it['unit_price']:,.0f}</td>"
-                        f"<td style='padding:7px 14px;text-align:right;font-weight:500'>₦{it['total_price']:,.0f}</td>"
-                        f"</tr>")
+            # ── Build receipt rows (Product | Qty | Unit Price | Amount)
+            rows_html = ""
+            for it in r_items:
+                rows_html += (
+                    f"<tr style='border-bottom:1px solid #f0f4f8'>"
+                    f"<td style='padding:8px 14px;font-size:13px'>{it['product_name']}</td>"
+                    f"<td style='padding:8px 8px;text-align:center;font-size:13px'>{int(it['qty'])}</td>"
+                    f"<td style='padding:8px 8px;text-align:right;font-size:13px'>₦{it['unit_price']:,.0f}</td>"
+                    f"<td style='padding:8px 14px;text-align:right;font-size:13px;"
+                    f"font-weight:600;color:#1e3a8a'>₦{it['total_price']:,.0f}</td>"
+                    f"</tr>")
 
-                subtotal_row = ""
-                if st.session_state["rb_apply_vat"]:
-                    subtotal_row = (
-                        f"<tr style='border-top:1px solid #e5e7eb'>"
-                        f"<td colspan='3' style='padding:5px 14px;text-align:right;color:#6b7280;font-size:12px'>Subtotal</td>"
-                        f"<td style='padding:5px 14px;text-align:right;font-size:12px'>₦{subtotal:,.0f}</td></tr>"
-                        f"<tr><td colspan='3' style='padding:5px 14px;text-align:right;color:#6b7280;font-size:12px'>VAT 7.5%</td>"
-                        f"<td style='padding:5px 14px;text-align:right;font-size:12px'>₦{vat_amount:,.0f}</td></tr>")
+            subtotal_row = ""
+            if st.session_state["rb_apply_vat"]:
+                subtotal_row = (
+                    f"<tr style='background:#fafafa;border-top:1px solid #e5e7eb'>"
+                    f"<td colspan='3' style='padding:6px 14px;text-align:right;"
+                    f"color:#6b7280;font-size:12px'>Subtotal</td>"
+                    f"<td style='padding:6px 14px;text-align:right;font-size:12px'>"
+                    f"₦{subtotal:,.0f}</td></tr>"
+                    f"<tr style='background:#fafafa'>"
+                    f"<td colspan='3' style='padding:6px 14px;text-align:right;"
+                    f"color:#6b7280;font-size:12px'>VAT (7.5%)</td>"
+                    f"<td style='padding:6px 14px;text-align:right;font-size:12px'>"
+                    f"₦{vat_amount:,.0f}</td></tr>")
 
-                split_rows = ""
-                if st.session_state["rb_split"]:
-                    split_rows = (
-                        f"<tr><td colspan='2' style='padding:4px 14px;color:#059669;font-size:11px'>"
-                        f"💳 {st.session_state['rb_payment']}</td>"
-                        f"<td colspan='2' style='text-align:right;padding:4px 14px;color:#059669;font-size:11px'>"
-                        f"₦{split1_amt:,.0f}</td></tr>"
-                        f"<tr><td colspan='2' style='padding:4px 14px;color:#059669;font-size:11px'>"
-                        f"💳 {st.session_state['rb_payment2']}</td>"
-                        f"<td colspan='2' style='text-align:right;padding:4px 14px;color:#059669;font-size:11px'>"
-                        f"₦{split2_amt:,.0f}</td></tr>")
+            split_rows = ""
+            if st.session_state["rb_split"]:
+                split_rows = (
+                    f"<tr><td colspan='2' style='padding:5px 14px;color:#059669;"
+                    f"font-size:12px'>💳 {st.session_state['rb_payment']}</td>"
+                    f"<td colspan='2' style='text-align:right;padding:5px 14px;"
+                    f"color:#059669;font-size:12px'>₦{split1_amt:,.0f}</td></tr>"
+                    f"<tr><td colspan='2' style='padding:5px 14px;color:#059669;"
+                    f"font-size:12px'>💳 {st.session_state['rb_payment2']}</td>"
+                    f"<td colspan='2' style='text-align:right;padding:5px 14px;"
+                    f"color:#059669;font-size:12px'>₦{split2_amt:,.0f}</td></tr>")
 
-                phone_line = f"<br><span style='font-size:11px;color:#9ca3af'>📱 {phone_norm(st.session_state['rb_phone'])}</span>" \
-                             if st.session_state["rb_phone"] else ""
-                pay_display = (f"{st.session_state['rb_payment']} + {st.session_state['rb_payment2']}"
-                               if st.session_state["rb_split"] else st.session_state["rb_payment"])
+            # Receipt rendered inside a narrow centred column so it looks like
+            # a real receipt — not raw code, just clean HTML in markdown
+            rc_col, ctrl_col = st.columns([3, 2])
 
-                card = f"""
-<div style='background:white;border:1px solid #e5e7eb;border-radius:14px;
-            overflow:hidden;box-shadow:0 3px 16px rgba(0,0,0,.10);font-family:Arial,sans-serif'>
-  <div style='background:linear-gradient(135deg,#1d4ed8,#3b82f6);color:white;
-              text-align:center;padding:22px 16px 18px'>
-    <div style='font-size:21px;font-weight:700;letter-spacing:.4px'>☕ Kokari Cafe</div>
-    <div style='font-size:11px;opacity:.8;margin-top:3px'>Official Receipt · {st.session_state["rb_date"]}</div>
+            with rc_col:
+                st.markdown("#### 🧾 Receipt Preview")
+                receipt_card = f"""
+<div style="font-family:'Segoe UI',Arial,sans-serif;background:white;
+     border:1px solid #dde3ee;border-radius:12px;overflow:hidden;
+     box-shadow:0 4px 18px rgba(30,58,138,.10);max-width:440px">
+  <!-- Header -->
+  <div style="background:linear-gradient(135deg,#1d4ed8,#3b82f6);
+              color:white;text-align:center;padding:20px 16px 16px">
+    <div style="font-size:20px;font-weight:800;letter-spacing:.5px">☕ Kokari Cafe</div>
+    <div style="font-size:11px;opacity:.8;margin-top:3px">
+      Official Receipt &nbsp;·&nbsp; {st.session_state["rb_date"]}
+    </div>
   </div>
-  <div style='padding:13px 16px;border-bottom:1px dashed #e5e7eb;font-size:12px;color:#374151;
-              display:grid;grid-template-columns:1fr 1fr;gap:4px'>
-    <span style='color:#9ca3af'>Customer</span>
-    <span style='text-align:right;font-weight:600'>{st.session_state["rb_customer"]}{phone_line}</span>
-    <span style='color:#9ca3af'>Type</span>
-    <span style='text-align:right'>{st.session_state["rb_order_type"]}</span>
-    <span style='color:#9ca3af'>Payment</span>
-    <span style='text-align:right'>{pay_display}</span>
-    <span style='color:#9ca3af'>Status</span>
-    <span style='text-align:right'>
-      <span style='background:#d1fae5;color:#065f46;padding:1px 8px;border-radius:8px;font-size:11px;font-weight:600'>
+  <!-- Order meta -->
+  <div style="padding:12px 16px;border-bottom:1px dashed #dde3ee;font-size:12px;color:#374151">
+    <div style="display:flex;justify-content:space-between;margin-bottom:3px">
+      <span style="color:#9ca3af">Customer</span>
+      <span style="font-weight:700">{st.session_state["rb_customer"]}{phone_line}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;margin-bottom:3px">
+      <span style="color:#9ca3af">Order Type</span>
+      <span>{st.session_state["rb_order_type"]}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;margin-bottom:3px">
+      <span style="color:#9ca3af">Payment</span>
+      <span>{pay_display}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between">
+      <span style="color:#9ca3af">Status</span>
+      <span style="background:#d1fae5;color:#065f46;padding:2px 10px;
+                   border-radius:8px;font-size:11px;font-weight:600">
         {st.session_state["rb_status"]}
       </span>
-    </span>
+    </div>
   </div>
-  <table style='width:100%;border-collapse:collapse;font-size:13px'>
-    <thead><tr style='background:#f8fafc'>
-      <th style='padding:7px 14px;text-align:left;font-size:10px;color:#9ca3af;text-transform:uppercase;letter-spacing:.5px;font-weight:600'>Item</th>
-      <th style='padding:7px 6px;text-align:center;font-size:10px;color:#9ca3af;text-transform:uppercase;letter-spacing:.5px;font-weight:600'>Qty</th>
-      <th style='padding:7px 6px;text-align:right;font-size:10px;color:#9ca3af;text-transform:uppercase;letter-spacing:.5px;font-weight:600'>Price</th>
-      <th style='padding:7px 14px;text-align:right;font-size:10px;color:#9ca3af;text-transform:uppercase;letter-spacing:.5px;font-weight:600'>Total</th>
-    </tr></thead>
+  <!-- Line items -->
+  <table style="width:100%;border-collapse:collapse">
+    <thead>
+      <tr style="background:#f1f5fb">
+        <th style="padding:7px 14px;text-align:left;font-size:10px;
+                   color:#6b7280;font-weight:700;text-transform:uppercase;
+                   letter-spacing:.6px">Product</th>
+        <th style="padding:7px 6px;text-align:center;font-size:10px;
+                   color:#6b7280;font-weight:700;text-transform:uppercase;
+                   letter-spacing:.6px">Qty</th>
+        <th style="padding:7px 6px;text-align:right;font-size:10px;
+                   color:#6b7280;font-weight:700;text-transform:uppercase;
+                   letter-spacing:.6px">Unit Price</th>
+        <th style="padding:7px 14px;text-align:right;font-size:10px;
+                   color:#6b7280;font-weight:700;text-transform:uppercase;
+                   letter-spacing:.6px">Amount</th>
+      </tr>
+    </thead>
     <tbody>{rows_html}</tbody>
     <tfoot>
       {subtotal_row}
-      <tr style='border-top:2px solid #e5e7eb'>
-        <td colspan='3' style='padding:8px 14px;text-align:right;font-weight:700;font-size:13px'>
-          {'Grand Total (incl. VAT)' if st.session_state['rb_apply_vat'] else 'Total'}</td>
-        <td style='padding:8px 14px;text-align:right;font-weight:800;font-size:15px;color:#1d4ed8'>
-          ₦{grand_total:,.0f}</td>
+      <tr style="border-top:2px solid #bfdbfe;background:#eff6ff">
+        <td colspan="3" style="padding:9px 14px;text-align:right;
+                               font-weight:700;font-size:13px;color:#1e3a8a">
+          {"Grand Total (incl. VAT)" if st.session_state["rb_apply_vat"] else "Grand Total"}
+        </td>
+        <td style="padding:9px 14px;text-align:right;font-weight:800;
+                   font-size:16px;color:#1d4ed8">₦{grand_total:,.0f}</td>
       </tr>
       {split_rows}
     </tfoot>
   </table>
-  <div style='background:#1d4ed8;color:white;display:flex;justify-content:space-between;
-              align-items:center;padding:13px 16px'>
-    <span style='font-size:14px;font-weight:700;letter-spacing:.3px'>GRAND TOTAL</span>
-    <span style='font-size:18px;font-weight:800'>₦{grand_total:,.0f}</span>
+  <!-- Footer bar -->
+  <div style="background:#1d4ed8;color:white;display:flex;
+              justify-content:space-between;align-items:center;padding:12px 16px">
+    <span style="font-size:13px;font-weight:700;letter-spacing:.3px">TOTAL PAYABLE</span>
+    <span style="font-size:18px;font-weight:800">₦{grand_total:,.0f}</span>
   </div>
-  <div style='text-align:center;padding:14px 16px;font-size:11px;color:#9ca3af'>
+  <div style="text-align:center;padding:12px 16px 14px;
+              font-size:11px;color:#9ca3af;background:#fafbff">
     Thank you for visiting Kokari Cafe! 🙏<br>
-    <span style='font-size:10px'>Kokari Cafe POS v2.1 · {str(date.today())}</span>
+    <span style="font-size:10px">Kokari Cafe POS · {str(date.today())}</span>
   </div>
 </div>"""
-                st.markdown(card, unsafe_allow_html=True)
+                st.markdown(receipt_card, unsafe_allow_html=True)
 
-            with right:
-                st.markdown("**Order Summary**")
-
-                # Totals
+            with ctrl_col:
+                st.markdown("#### 📊 Summary")
                 if show_margins:
                     tot_cogs = sum(float(i["total_cogs"]) for i in r_items)
                     gp_val   = subtotal - tot_cogs
@@ -1421,28 +1514,27 @@ def _render_receipt_builder(container, prods_df, role):
                     st.metric("Grand Total", fmt(grand_total))
 
                 st.markdown("---")
-                st.markdown("**Remove Item**")
+                st.markdown("**Remove an item:**")
                 rem_opts = [
                     f"{i+1}. {r_items[i]['product_name']} ×{int(r_items[i]['qty'])}"
                     for i in range(len(r_items))
                 ]
-                rem_sel = st.selectbox("Select item", rem_opts, label_visibility="collapsed")
+                rem_sel = st.selectbox("Item to remove",
+                                        rem_opts, label_visibility="collapsed")
                 if st.button("🗑️ Remove", use_container_width=True):
                     st.session_state["rb_items"].pop(rem_opts.index(rem_sel))
                     st.rerun()
 
                 st.markdown("---")
-
-                # Save
-                if st.button("💾 Save & Get Receipt", type="primary", use_container_width=True):
-                    receipt_no  = _get_next_receipt_no()
-                    pay_note    = st.session_state["rb_note"]
+                if st.button("💾 Save & Get Receipt",
+                              type="primary", use_container_width=True):
+                    receipt_no = _get_next_receipt_no()
+                    pay_note   = st.session_state["rb_note"]
                     if st.session_state["rb_split"]:
                         pay_note = (
                             f"Split: {st.session_state['rb_payment']} ₦{split1_amt:,.0f} + "
                             f"{st.session_state['rb_payment2']} ₦{split2_amt:,.0f}. {pay_note}"
                         ).strip(". ")
-
                     save_single_order(
                         st.session_state["rb_date"],
                         st.session_state["rb_customer"],
@@ -1452,7 +1544,6 @@ def _render_receipt_builder(container, prods_df, role):
                         grand_total, pay_note,
                         st.session_state["rb_items"],
                         phone_norm(st.session_state["rb_phone"]))
-
                     html_receipt = generate_receipt_html(
                         st.session_state["rb_date"],
                         st.session_state["rb_customer"],
@@ -1468,7 +1559,6 @@ def _render_receipt_builder(container, prods_df, role):
                          "method2": st.session_state["rb_payment2"], "amount2": split2_amt}
                         if st.session_state["rb_split"] else None,
                         receipt_no)
-
                     st.session_state["rb_last_receipt"] = (html_receipt, receipt_no)
                     _rb_reset(keep_last=True)
                     st.rerun()
@@ -2427,7 +2517,12 @@ def main():
                     if uploaded_sales.name.endswith(".csv"):
                         imp_df = pd.read_csv(uploaded_sales, dtype=str)
                     else:
-                        imp_df = pd.read_excel(uploaded_sales, dtype=str)
+                        try:
+                            imp_df = pd.read_excel(uploaded_sales, dtype=str, engine="openpyxl")
+                        except ImportError:
+                            st.error("❌ openpyxl is not installed. Add `openpyxl` to requirements.txt "
+                                     "and restart the app, or upload a .csv file instead.")
+                            st.stop()
                     imp_df.columns = [c.strip().lower().replace(" ","_") for c in imp_df.columns]
                     st.success(f"✅ File loaded: **{len(imp_df)} rows**, **{len(imp_df.columns)} columns**")
                     st.caption(f"Columns found: {list(imp_df.columns)}")
@@ -2572,7 +2667,12 @@ def main():
                     if uploaded_exp.name.endswith(".csv"):
                         exp_imp_df = pd.read_csv(uploaded_exp, dtype=str)
                     else:
-                        exp_imp_df = pd.read_excel(uploaded_exp, dtype=str)
+                        try:
+                            exp_imp_df = pd.read_excel(uploaded_exp, dtype=str, engine="openpyxl")
+                        except ImportError:
+                            st.error("❌ openpyxl is not installed. Add `openpyxl` to requirements.txt "
+                                     "and restart the app, or upload a .csv file instead.")
+                            st.stop()
                     exp_imp_df.columns = [c.strip().lower().replace(" ","_") for c in exp_imp_df.columns]
                     st.success(f"✅ File loaded: **{len(exp_imp_df)} rows**")
 
