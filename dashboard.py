@@ -1115,167 +1115,190 @@ def _rb_reset(keep_last=False):
 
 def _render_receipt_builder(container, prods_df, role):
     """
-    Robust Order Receipt Builder.
-    - All state stored as plain JSON-serialisable primitives (strings/numbers/bools/lists)
-    - No raw date objects in session_state
-    - No conditional widget creation inside forms
-    - Split payment fields always rendered (shown/hidden via opacity)
+    Optimised Order Receipt Builder.
+    - Single unified form: order details + add items on same page
+    - Whole-number qty only
+    - Unit price auto-populated per product, still editable
+    - All state in JSON-safe primitives (strings/ints/floats/bools/lists)
     Role='attendant' hides COGS/margin columns.
     """
     show_margins = (role != "attendant")
     _rb_init()
 
+    # Product lookup tables built once
+    prod_names  = prods_df["name"].tolist()
+    prod_ids    = prods_df["id"].tolist()
+    prod_chans  = prods_df["channel"].tolist()
+    prod_ratios = prods_df["cost_ratio"].tolist()
+    prod_prices = prods_df["default_price"].tolist()
+    # price_map: name → default_price for JS-free auto-population
+    price_map   = {prod_names[i]: float(prod_prices[i]) for i in range(len(prod_names))}
+    # Simple labels: product name + price (no channel clutter for attendant)
+    prod_labels = [f"{prod_names[i]}  ·  {fmt(prod_prices[i])}" for i in range(len(prod_names))]
+
+    customers_df = load_customers()
+    cust_names   = ["Walk-in"] + (customers_df["name"].tolist() if not customers_df.empty else [])
+
     with container:
-        st.markdown("### 🧾 Order Receipt Builder")
+        st.markdown("### 🧾 New Order")
 
-        # ── STEP 1: Order Details (always visible, re-editable) ──
-        customers_df = load_customers()
-        cust_names   = ["Walk-in"] + (customers_df["name"].tolist() if not customers_df.empty else [])
+        # ── LAST RECEIPT DOWNLOAD (top, clears on new order) ────
+        if st.session_state.get("rb_last_receipt"):
+            html_r, rec_no = st.session_state["rb_last_receipt"]
+            st.success(f"✅ Order **#{rec_no}** saved!")
+            c1, c2 = st.columns(2)
+            with c1:
+                receipt_download_button(html_r, rec_no)
+            with c2:
+                if st.button("🆕 Start New Order", use_container_width=True, type="primary"):
+                    st.session_state["rb_last_receipt"] = None
+                    _rb_reset()
+                    st.rerun()
+            st.divider()
+            return   # don't show the form until they click New Order
 
-        with st.expander("1️⃣ Order Details", expanded=not st.session_state["rb_active"]):
-            # All inputs outside a <form> so values update live and
-            # no date-object-in-session-state issue occurs
-            dc1, dc2, dc3 = st.columns(3)
-            # Date stored as string to avoid Streamlit serialisation issues
-            date_val = dc1.date_input(
-                "Order Date",
-                value=date.fromisoformat(st.session_state["rb_date"]),
-                key="rb_date_widget")
-            st.session_state["rb_date"] = str(date_val)   # immediately convert to str
+        # ── SECTION A: ORDER DETAILS ─────────────────────────────
+        # All outside a form — avoids date serialisation crash
+        st.markdown("#### 📋 Order Details")
 
-            # Customer — autocomplete from existing + free-type override
-            cust_sel = dc2.selectbox(
-                "Existing Customer",
-                cust_names,
-                index=cust_names.index(st.session_state["rb_customer"])
-                      if st.session_state["rb_customer"] in cust_names else 0,
-                key="rb_cust_sel")
+        dc1, dc2, dc3 = st.columns(3)
+        date_val = dc1.date_input(
+            "Date", value=date.fromisoformat(st.session_state["rb_date"]),
+            key="rb_date_widget")
+        st.session_state["rb_date"] = str(date_val)
 
-            cust_custom = dc3.text_input(
-                "New / Override Name",
-                value="" if st.session_state["rb_customer"] in cust_names else st.session_state["rb_customer"],
-                placeholder="Type to override…",
-                key="rb_cust_custom")
+        cust_sel = dc2.selectbox(
+            "Customer",
+            cust_names,
+            index=cust_names.index(st.session_state["rb_customer"])
+                  if st.session_state["rb_customer"] in cust_names else 0,
+            key="rb_cust_sel")
 
-            pc1, pc2 = st.columns(2)
-            phone_val = pc1.text_input(
-                "Phone Number",
-                value=st.session_state["rb_phone"],
-                placeholder="08012345678",
-                key="rb_phone_widget")
-            st.session_state["rb_phone"] = phone_val
+        cust_custom = dc3.text_input(
+            "New customer name",
+            value="" if st.session_state["rb_customer"] in cust_names
+                     else st.session_state["rb_customer"],
+            placeholder="Type to add new…",
+            key="rb_cust_custom")
 
-            order_types = ["Dine-in", "Take-out", "Delivery", "B2B"]
-            ot_idx = order_types.index(st.session_state["rb_order_type"]) \
-                     if st.session_state["rb_order_type"] in order_types else 0
-            ot_val = pc2.selectbox("Order Type", order_types, index=ot_idx, key="rb_otype_widget")
-            st.session_state["rb_order_type"] = ot_val
+        pc1, pc2, pc3 = st.columns(3)
+        phone_val = pc1.text_input(
+            "Phone", value=st.session_state["rb_phone"],
+            placeholder="08012345678", key="rb_phone_widget")
+        st.session_state["rb_phone"] = phone_val
 
-            pm1, pm2, pm3 = st.columns(3)
-            pay_idx = PAYMENT_METHODS.index(st.session_state["rb_payment"]) \
-                      if st.session_state["rb_payment"] in PAYMENT_METHODS else 0
-            pay_val = pm1.selectbox("Payment Method", PAYMENT_METHODS, index=pay_idx, key="rb_pay_widget")
-            st.session_state["rb_payment"] = pay_val
+        order_types = ["Dine-in", "Take-out", "Delivery", "B2B"]
+        ot_val = pc2.selectbox(
+            "Order Type", order_types,
+            index=order_types.index(st.session_state["rb_order_type"])
+                  if st.session_state["rb_order_type"] in order_types else 0,
+            key="rb_otype_widget")
+        st.session_state["rb_order_type"] = ot_val
 
-            stat_idx = ORDER_STATUSES.index(st.session_state["rb_status"]) \
-                       if st.session_state["rb_status"] in ORDER_STATUSES else 0
-            stat_val = pm2.selectbox("Status", ORDER_STATUSES, index=stat_idx, key="rb_stat_widget")
-            st.session_state["rb_status"] = stat_val
+        pay_val = pc3.selectbox(
+            "Payment", PAYMENT_METHODS,
+            index=PAYMENT_METHODS.index(st.session_state["rb_payment"])
+                  if st.session_state["rb_payment"] in PAYMENT_METHODS else 0,
+            key="rb_pay_widget")
+        st.session_state["rb_payment"] = pay_val
 
-            note_val = pm3.text_input("Note (optional)", value=st.session_state["rb_note"], key="rb_note_widget")
-            st.session_state["rb_note"] = note_val
+        fl1, fl2, fl3 = st.columns(3)
+        stat_val = fl1.selectbox(
+            "Status", ORDER_STATUSES,
+            index=ORDER_STATUSES.index(st.session_state["rb_status"])
+                  if st.session_state["rb_status"] in ORDER_STATUSES else 0,
+            key="rb_stat_widget")
+        st.session_state["rb_status"] = stat_val
 
-            # VAT + Split toggles — plain checkboxes outside form, state stored as bools
-            fl1, fl2 = st.columns(2)
-            vat_val   = fl1.checkbox("Apply VAT (7.5%)", value=st.session_state["rb_apply_vat"], key="rb_vat_widget")
-            split_val = fl2.checkbox("Split Payment",    value=st.session_state["rb_split"],     key="rb_split_widget")
-            st.session_state["rb_apply_vat"] = vat_val
-            st.session_state["rb_split"]     = split_val
+        vat_val   = fl2.checkbox("Apply VAT (7.5%)",
+                                  value=st.session_state["rb_apply_vat"], key="rb_vat_widget")
+        split_val = fl3.checkbox("Split Payment",
+                                  value=st.session_state["rb_split"], key="rb_split_widget")
+        st.session_state["rb_apply_vat"] = vat_val
+        st.session_state["rb_split"]     = split_val
 
-            # Split payment fields — always rendered, only visible when split=True
-            # This avoids conditional widget creation which confuses Streamlit's state
-            if st.session_state["rb_split"]:
-                other_methods = [m for m in PAYMENT_METHODS if m != st.session_state["rb_payment"]]
-                sp1, sp2 = st.columns(2)
-                pay2_idx = other_methods.index(st.session_state["rb_payment2"]) \
-                           if st.session_state["rb_payment2"] in other_methods else 0
-                pay2_val = sp1.selectbox("2nd Payment Method", other_methods,
-                                         index=pay2_idx, key="rb_pay2_widget")
-                pay2_amt = sp2.number_input("2nd Payment Amount (₦)",
-                                             min_value=0.0, step=100.0,
-                                             value=float(st.session_state["rb_payment2_amt"]),
-                                             key="rb_pay2_amt_widget")
-                st.session_state["rb_payment2"]     = pay2_val
-                st.session_state["rb_payment2_amt"] = float(pay2_amt)
+        if st.session_state["rb_split"]:
+            other_methods = [m for m in PAYMENT_METHODS if m != st.session_state["rb_payment"]]
+            sp1, sp2 = st.columns(2)
+            pay2_idx = other_methods.index(st.session_state["rb_payment2"]) \
+                       if st.session_state["rb_payment2"] in other_methods else 0
+            pay2_val = sp1.selectbox("2nd Payment Method", other_methods,
+                                     index=pay2_idx, key="rb_pay2_widget")
+            pay2_amt = sp2.number_input("2nd Payment Amount (₦)",
+                                         min_value=0.0, step=100.0,
+                                         value=float(st.session_state["rb_payment2_amt"]),
+                                         key="rb_pay2_amt_widget")
+            st.session_state["rb_payment2"]     = pay2_val
+            st.session_state["rb_payment2_amt"] = float(pay2_amt)
 
-            st.markdown("")
-            if st.button("✅ Confirm Order Details", type="primary", use_container_width=True, key="rb_confirm_hdr"):
-                # Resolve customer name — custom overrides dropdown
-                resolved_cust = cust_custom.strip() if cust_custom.strip() else cust_sel
-                st.session_state["rb_customer"] = resolved_cust
-                st.session_state["rb_active"]   = True
-                st.session_state["rb_items"]    = []
-                st.session_state.pop("rb_last_receipt", None)
-                st.rerun()
+        note_val = st.text_input("Note (optional)",
+                                  value=st.session_state["rb_note"], key="rb_note_widget")
+        st.session_state["rb_note"] = note_val
 
-        # ── Active order badge ───────────────────────────────────
-        if st.session_state["rb_active"]:
-            vat_badge   = " · 🧾VAT" if st.session_state["rb_apply_vat"] else ""
-            split_badge = " · 💳Split" if st.session_state["rb_split"] else ""
-            phone_badge = f" · 📱{phone_norm(st.session_state['rb_phone'])}" \
-                          if st.session_state["rb_phone"] else ""
-            st.success(
-                f"**Active Order:** {st.session_state['rb_customer']}{phone_badge} · "
-                f"{st.session_state['rb_date']} · {st.session_state['rb_order_type']} · "
-                f"{st.session_state['rb_payment']}{vat_badge}{split_badge}")
+        st.divider()
 
-        # ── STEP 2: Add Products ─────────────────────────────────
-        if st.session_state["rb_active"]:
-            st.markdown("#### 2️⃣ Add Products")
+        # ── SECTION B: ADD PRODUCT (single form, clear_on_submit) ─
+        st.markdown("#### ➕ Add Item to Order")
 
-            prod_names  = prods_df["name"].tolist()
-            prod_ids    = prods_df["id"].tolist()
-            prod_chans  = prods_df["channel"].tolist()
-            prod_ratios = prods_df["cost_ratio"].tolist()
-            prod_prices = prods_df["default_price"].tolist()
-            prod_labels = [
-                f"{prod_names[i]}  [{prod_chans[i]}]  ·  {fmt(prod_prices[i])}"
-                for i in range(len(prod_names))
-            ]
+        # Track the selected product to auto-populate price
+        if "rb_sel_prod_label" not in st.session_state:
+            st.session_state["rb_sel_prod_label"] = prod_labels[0] if prod_labels else ""
 
-            with st.form("rb_add_item_form", clear_on_submit=True):
-                ai1, ai2, ai3 = st.columns([3, 1, 2])
-                sel_label = ai1.selectbox(
-                    "Product", prod_labels if prod_labels else ["No products"],
-                    label_visibility="visible")
-                sel_i     = prod_labels.index(sel_label) if sel_label in prod_labels else 0
-                ai_qty    = ai2.number_input("Qty", min_value=0.0, step=0.5, value=1.0)
-                def_price = float(prod_prices[sel_i]) if prod_prices else 0.0
-                ai_price  = ai3.number_input("Unit Price (₦)", min_value=0.0, step=100.0, value=def_price)
-                add_btn   = st.form_submit_button("➕ Add to Order", type="primary", use_container_width=True)
+        with st.form("rb_add_item_form", clear_on_submit=True):
+            fi1, fi2, fi3 = st.columns([4, 2, 2])
 
-            if add_btn and ai_qty > 0 and prod_names:
-                ratio = float(prod_ratios[sel_i])
-                tp    = round(ai_qty * ai_price)
-                st.session_state["rb_items"].append({
-                    "product_id":   str(prod_ids[sel_i]),
-                    "product_name": str(prod_names[sel_i]),
-                    "channel":      str(prod_chans[sel_i]),
-                    "category":     str(prod_chans[sel_i]),
-                    "qty":          float(ai_qty),
-                    "unit_price":   float(ai_price),
-                    "total_price":  float(tp),
-                    "cost_ratio":   ratio,
-                    "unit_cogs":    float(round(ai_price * ratio)),
-                    "total_cogs":   float(round(tp * ratio)),
-                })
-                st.rerun()
+            sel_label = fi1.selectbox(
+                "Product",
+                prod_labels if prod_labels else ["No products — add products in Admin"],
+                key="rb_prod_sel_form")
+            sel_i     = prod_labels.index(sel_label) if sel_label in prod_labels else 0
 
-        # ── STEP 3: Live Receipt Preview ─────────────────────────
+            # Qty — whole integers only, no decimals
+            ai_qty = fi2.number_input("Qty", min_value=1, max_value=999,
+                                       step=1, value=1, format="%d")
+
+            # Unit price: auto-filled from product default, admin can override
+            auto_price = float(prod_prices[sel_i]) if prod_prices else 0.0
+            if show_margins:
+                # Admin sees price field editable
+                ai_price = fi3.number_input("Unit Price (₦)",
+                                             min_value=0.0, step=50.0,
+                                             value=auto_price, format="%.0f")
+            else:
+                # Attendant sees price display only (read-only via disabled)
+                ai_price = fi3.number_input("Unit Price (₦)",
+                                             min_value=0.0, step=50.0,
+                                             value=auto_price, format="%.0f",
+                                             disabled=True)
+
+            add_btn = st.form_submit_button("➕ Add to Order",
+                                             type="primary", use_container_width=True)
+
+        if add_btn and prod_names:
+            ratio = float(prod_ratios[sel_i])
+            tp    = int(ai_qty) * float(ai_price)
+            resolved_cust = cust_custom.strip() if cust_custom.strip() else cust_sel
+            st.session_state["rb_customer"] = resolved_cust
+            st.session_state["rb_items"].append({
+                "product_id":   str(prod_ids[sel_i]),
+                "product_name": str(prod_names[sel_i]),
+                "channel":      str(prod_chans[sel_i]),
+                "category":     str(prod_chans[sel_i]),
+                "qty":          int(ai_qty),
+                "unit_price":   float(ai_price),
+                "total_price":  float(round(tp)),
+                "cost_ratio":   ratio,
+                "unit_cogs":    float(round(float(ai_price) * ratio)),
+                "total_cogs":   float(round(tp * ratio)),
+            })
+            st.rerun()
+
+        # ── SECTION C: LIVE RECEIPT PREVIEW ─────────────────────
         r_items = st.session_state.get("rb_items", [])
 
-        if st.session_state["rb_active"] and r_items:
-            st.markdown("#### 3️⃣ Receipt Preview")
+        if r_items:
+            st.divider()
+            st.markdown("#### 🧾 Live Receipt Preview")
 
             subtotal    = sum(float(i["total_price"]) for i in r_items)
             vat_amount  = round(subtotal * 0.075) if st.session_state["rb_apply_vat"] else 0
@@ -1294,7 +1317,7 @@ def _render_receipt_builder(container, prods_df, role):
                     rows_html += (
                         f"<tr style='border-bottom:1px solid #f3f4f6'>"
                         f"<td style='padding:7px 14px'>{it['product_name']}</td>"
-                        f"<td style='padding:7px 8px;text-align:center'>{it['qty']:g}</td>"
+                        f"<td style='padding:7px 8px;text-align:center'>{int(it['qty'])}</td>"
                         f"<td style='padding:7px 8px;text-align:right'>₦{it['unit_price']:,.0f}</td>"
                         f"<td style='padding:7px 14px;text-align:right;font-weight:500'>₦{it['total_price']:,.0f}</td>"
                         f"</tr>")
@@ -1400,7 +1423,7 @@ def _render_receipt_builder(container, prods_df, role):
                 st.markdown("---")
                 st.markdown("**Remove Item**")
                 rem_opts = [
-                    f"{i+1}. {r_items[i]['product_name']} ×{r_items[i]['qty']:g}"
+                    f"{i+1}. {r_items[i]['product_name']} ×{int(r_items[i]['qty'])}"
                     for i in range(len(r_items))
                 ]
                 rem_sel = st.selectbox("Select item", rem_opts, label_visibility="collapsed")
@@ -1454,19 +1477,122 @@ def _render_receipt_builder(container, prods_df, role):
                     _rb_reset()
                     st.rerun()
 
-        elif st.session_state["rb_active"]:
-            st.info("No items yet — select a product above and click ➕ Add to Order.")
+        else:
+            st.info("👆 Select a product above and click ➕ Add to Order to begin building your receipt.")
 
-        # ── Receipt download (shown after save, persists until new order) ──
-        if st.session_state.get("rb_last_receipt"):
-            html_r, rec_no = st.session_state["rb_last_receipt"]
-            st.divider()
-            st.success(f"✅ Order **#{rec_no}** saved successfully!")
-            receipt_download_button(html_r, rec_no)
-            if st.button("🆕 Start New Order", use_container_width=True):
-                st.session_state["rb_last_receipt"] = None
-                _rb_reset()
-                st.rerun()
+
+def _render_attendant_report(orders_df, items_df, username, report_date):
+    """Daily sales summary for attendant — no margins/COGS shown."""
+    st.markdown(f"### 📊 Today's Sales Report — {report_date}")
+    st.caption(f"Recorded by **{username}**")
+
+    if orders_df.empty:
+        st.info("No orders recorded today yet. Start adding orders in the New Order tab.")
+        return
+
+    # ── KPI Row ──────────────────────────────────────────────────
+    total_rev  = float(orders_df["total_amount"].sum())
+    num_orders = len(orders_df)
+    avg_order  = total_rev / num_orders if num_orders else 0
+    total_qty  = int(items_df["qty"].sum()) if not items_df.empty else 0
+
+    m1,m2,m3,m4 = st.columns(4)
+    m1.metric("💰 Total Revenue",  fmt(total_rev))
+    m2.metric("🧾 Orders",         num_orders)
+    m3.metric("💳 Avg Order",      fmt(avg_order))
+    m4.metric("📦 Items Sold",     total_qty)
+
+    st.divider()
+
+    # ── Payment Method Breakdown ─────────────────────────────────
+    st.markdown("#### 💳 Payment Breakdown")
+    pay_grp = orders_df.groupby("payment_method")["total_amount"].agg(
+        total="sum", count="count").reset_index()
+    pay_grp.columns = ["Payment Method","Revenue","Orders"]
+    pay_grp["Revenue"] = pay_grp["Revenue"].map("₦{:,.0f}".format)
+    st.dataframe(pay_grp, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Product Sales Breakdown ──────────────────────────────────
+    if not items_df.empty:
+        st.markdown("#### 🛒 Products Sold Today")
+        prod_grp = items_df.groupby("product_name").agg(
+            qty=("qty","sum"),
+            revenue=("total_price","sum")
+        ).reset_index().sort_values("revenue", ascending=False)
+        prod_grp["qty"]     = prod_grp["qty"].astype(int)
+        prod_grp["revenue"] = prod_grp["revenue"].map("₦{:,.0f}".format)
+        prod_grp.columns    = ["Product", "Qty Sold", "Revenue"]
+        st.dataframe(prod_grp, use_container_width=True, hide_index=True)
+        st.divider()
+
+    # ── Order-by-Order Log ───────────────────────────────────────
+    st.markdown("#### 📋 All Orders Today")
+    log = orders_df[["id","date","customer_name","order_type","payment_method",
+                      "status","total_amount","note"]].copy()
+    log.columns = ["ID","Date","Customer","Type","Payment","Status","Amount","Note"]
+    log["Amount"] = log["Amount"].map("₦{:,.0f}".format)
+    st.dataframe(log, use_container_width=True, hide_index=True, height=280)
+
+    # ── Customer Summary ─────────────────────────────────────────
+    st.divider()
+    st.markdown("#### 👤 Customers Served Today")
+    cust_grp = orders_df[orders_df["customer_name"] != "Walk-in"].groupby("customer_name").agg(
+        orders=("id","count"),
+        total=("total_amount","sum")
+    ).reset_index().sort_values("total", ascending=False)
+    walkin_count = len(orders_df[orders_df["customer_name"] == "Walk-in"])
+
+    if not cust_grp.empty:
+        cust_grp["total"]  = cust_grp["total"].map("₦{:,.0f}".format)
+        cust_grp.columns   = ["Customer","Orders","Total Spend"]
+        st.dataframe(cust_grp, use_container_width=True, hide_index=True)
+
+    if walkin_count > 0:
+        st.caption(f"+ **{walkin_count}** walk-in order(s)")
+
+    # ── Order Type Breakdown ─────────────────────────────────────
+    if "order_type" in orders_df.columns:
+        st.divider()
+        st.markdown("#### 🏷️ By Order Type")
+        type_grp = orders_df.groupby("order_type")["total_amount"].agg(
+            total="sum", count="count").reset_index()
+        type_grp.columns = ["Order Type","Revenue","Orders"]
+        type_grp["Revenue"] = type_grp["Revenue"].map("₦{:,.0f}".format)
+        st.dataframe(type_grp, use_container_width=True, hide_index=True)
+
+    # ── WhatsApp-Ready Closing Summary ──────────────────────────
+    st.divider()
+    st.markdown("#### 📤 Closing Summary (copy to send)")
+    top_prod = ""
+    if not items_df.empty:
+        tp_row = items_df.groupby("product_name")["qty"].sum().idxmax()
+        tp_qty = int(items_df.groupby("product_name")["qty"].sum().max())
+        top_prod = f"\n🏆 Top item: {tp_row} ({tp_qty} sold)"
+
+    pay_lines = ""
+    for _, row in orders_df.groupby("payment_method")["total_amount"].sum().items():
+        pass  # build below
+    pay_summary = " | ".join(
+        f"{pm}: ₦{int(amt):,}"
+        for pm, amt in orders_df.groupby("payment_method")["total_amount"].sum().items()
+    )
+
+    summary_text = (
+        f"☕ KOKARI CAFE — DAILY REPORT\n"
+        f"📅 Date: {report_date}\n"
+        f"👤 Attendant: {username}\n"
+        f"────────────────\n"
+        f"💰 Revenue: ₦{int(total_rev):,}\n"
+        f"🧾 Orders: {num_orders}\n"
+        f"📦 Items sold: {total_qty}\n"
+        f"💳 Payments: {pay_summary}{top_prod}\n"
+        f"────────────────\n"
+        f"✅ End of day"
+    )
+    st.code(summary_text, language=None)
+    st.caption("Copy the text above and send via WhatsApp to the manager.")
 
 
 def _render_customers_readonly():
@@ -1576,11 +1702,29 @@ def main():
 
     # ── ATTENDANT VIEW — restricted single-tab layout ─────────────
     if is_attendant:
+        today      = date.today()
+        att_orders = load_orders(today, today)
+        att_items  = load_order_items(today, today)
         st.title("☕ Kokari Cafe · Order Entry")
-        st.caption(f"Logged in as **{username}** (Attendant) · {date.today()}")
-        att_tabs = st.tabs(["✍️ New Order", "👤 Customers"])
+        st.caption(f"Logged in as **{username}** (Attendant) · {today}")
+
+        # Quick KPI strip for attendant
+        att_rev   = float(att_orders["total_amount"].sum()) if not att_orders.empty else 0
+        att_count = len(att_orders)
+        att_avg   = att_rev / att_count if att_count else 0
+        att_units = int(att_items["qty"].sum()) if not att_items.empty else 0
+        k1,k2,k3,k4 = st.columns(4)
+        k1.metric("Today's Revenue",  fmt(att_rev))
+        k2.metric("Orders Today",      att_count)
+        k3.metric("Avg Order",         fmt(att_avg))
+        k4.metric("Items Sold",        att_units)
+        st.divider()
+
+        att_tabs = st.tabs(["✍️ New Order", "📊 Today's Report", "👤 Customers"])
         _render_receipt_builder(att_tabs[0], prods_df, role)
         with att_tabs[1]:
+            _render_attendant_report(att_orders, att_items, username, today)
+        with att_tabs[2]:
             _render_customers_readonly()
         st.stop()
 
@@ -1591,7 +1735,8 @@ def main():
 
     tabs = st.tabs(["📊 Dashboard","💬 WhatsApp Import","✍️ Manual Entry",
                     "📦 Orders","👤 Customers","💸 Expenses",
-                    "🏪 Channels","🛒 Products","📋 P&L Report","⚙️ Settings"])
+                    "🏪 Channels","🛒 Products","📋 P&L Report",
+                    "📥 Import","⚙️ Settings"])
 
     # ══════════════════════════════════════════════════════════════
     # TAB 0 — DASHBOARD
@@ -2227,9 +2372,282 @@ def main():
                 mime="text/csv")
 
     # ══════════════════════════════════════════════════════════════
-    # TAB 9 — SETTINGS
+    # TAB 9 — IMPORT TRANSACTIONS
     # ══════════════════════════════════════════════════════════════
     with tabs[9]:
+        st.markdown("### 📥 Import Transaction History")
+        st.caption(
+            "Import previous months' sales or expenses from CSV/Excel. "
+            "Rows are matched against existing data and duplicates are skipped. "
+            "Use this to bring in historical records or bulk-enter past transactions.")
+
+        imp_type = st.radio("What are you importing?",
+                            ["💰 Sales (Orders)", "💸 Expenses"],
+                            horizontal=True)
+        st.divider()
+
+        if imp_type == "💰 Sales (Orders)":
+            # ── SALES IMPORT ─────────────────────────────────────
+            st.markdown("#### 📄 Sales Import")
+
+            with st.expander("📋 Required CSV/Excel columns (click to view template)"):
+                st.markdown("""
+**Required columns:**
+| Column | Example | Notes |
+|---|---|---|
+| `date` | 2025-12-01 | YYYY-MM-DD format |
+| `customer_name` | Adaeze | Use Walk-in for anonymous |
+| `total_amount` | 9680 | Numbers only, no ₦ symbol |
+| `order_type` | Dine-in | Dine-in / Take-out / Delivery / B2B |
+| `payment_method` | Opay | Opay / Cash / POS / Bank Transfer / Other |
+| `status` | Confirmed | Confirmed / Pending / Cancelled |
+
+**Optional columns:**
+| Column | Notes |
+|---|---|
+| `note` | Any text note |
+| `phone` | Customer phone number |
+| `items` | Semicolon-separated: `Coffee×2,Zobo×1` |
+""")
+                # Downloadable template
+                template_sales = "date,customer_name,total_amount,order_type,payment_method,status,note,phone,items\n"
+                template_sales += "2025-12-01,Adaeze,9680,Dine-in,Opay,Confirmed,,+2348012345678,Coffee×2;Zobo×1\n"
+                template_sales += "2025-12-01,Walk-in,4300,Take-out,Cash,Confirmed,,,Pancakes×1\n"
+                st.download_button("⬇️ Download Sales Template CSV",
+                    data=template_sales.encode(),
+                    file_name="kokari_sales_import_template.csv", mime="text/csv")
+
+            uploaded_sales = st.file_uploader(
+                "Upload Sales CSV or Excel file",
+                type=["csv","xlsx","xls"],
+                key="imp_sales_upload")
+
+            if uploaded_sales:
+                try:
+                    if uploaded_sales.name.endswith(".csv"):
+                        imp_df = pd.read_csv(uploaded_sales, dtype=str)
+                    else:
+                        imp_df = pd.read_excel(uploaded_sales, dtype=str)
+                    imp_df.columns = [c.strip().lower().replace(" ","_") for c in imp_df.columns]
+                    st.success(f"✅ File loaded: **{len(imp_df)} rows**, **{len(imp_df.columns)} columns**")
+                    st.caption(f"Columns found: {list(imp_df.columns)}")
+
+                    # Validate required columns
+                    required_cols = {"date","customer_name","total_amount"}
+                    missing_cols  = required_cols - set(imp_df.columns)
+                    if missing_cols:
+                        st.error(f"❌ Missing required columns: {missing_cols}")
+                    else:
+                        # Preview
+                        st.markdown("**Preview (first 10 rows):**")
+                        st.dataframe(imp_df.head(10), use_container_width=True, hide_index=True)
+
+                        # Parse & validate
+                        errors, valid_rows = [], []
+                        for idx, row in imp_df.iterrows():
+                            try:
+                                r_date   = str(row.get("date","")).strip()
+                                r_cust   = str(row.get("customer_name","Walk-in")).strip() or "Walk-in"
+                                r_amt    = float(str(row.get("total_amount",0)).replace(",","").replace("₦",""))
+                                r_otype  = str(row.get("order_type","Dine-in")).strip()
+                                r_pay    = str(row.get("payment_method","Cash")).strip()
+                                r_status = str(row.get("status","Confirmed")).strip()
+                                r_note   = str(row.get("note","")).strip()
+                                r_phone  = str(row.get("phone","")).strip()
+                                r_items  = str(row.get("items","")).strip()
+                                # Validate date
+                                date.fromisoformat(r_date)
+                                valid_rows.append({
+                                    "date":r_date,"customer":r_cust,"amount":r_amt,
+                                    "order_type":r_otype if r_otype in ["Dine-in","Take-out","Delivery","B2B"] else "Dine-in",
+                                    "payment":r_pay if r_pay in PAYMENT_METHODS else "Other",
+                                    "status":r_status if r_status in ORDER_STATUSES else "Confirmed",
+                                    "note":r_note,"phone":r_phone,"items_raw":r_items
+                                })
+                            except Exception as e:
+                                errors.append(f"Row {idx+2}: {e}")
+
+                        if errors:
+                            with st.expander(f"⚠️ {len(errors)} row(s) with errors (will be skipped)"):
+                                for e in errors[:20]:
+                                    st.caption(e)
+
+                        st.info(f"**{len(valid_rows)}** valid rows ready to import · **{len(errors)}** will be skipped")
+
+                        if valid_rows and st.button(
+                                f"📥 Import {len(valid_rows)} Sales Orders",
+                                type="primary", use_container_width=True, key="do_sales_import"):
+                            conn_imp = get_conn()
+                            imported, skipped = 0, 0
+                            try:
+                                for r in valid_rows:
+                                    # Duplicate check: same date + customer + amount
+                                    exists = conn_imp.execute(
+                                        "SELECT id FROM orders WHERE date=? AND customer_name=? AND total_amount=?",
+                                        (r["date"], r["customer"], r["amount"])).fetchone()
+                                    if exists:
+                                        skipped += 1
+                                        continue
+                                    # Insert order
+                                    cur_imp = conn_imp.execute(
+                                        "INSERT INTO orders (date,customer_name,order_type,payment_method,"
+                                        "status,total_amount,note) VALUES (?,?,?,?,?,?,?)",
+                                        (r["date"],r["customer"],r["order_type"],r["payment"],
+                                         r["status"],r["amount"],r["note"]))
+                                    oid = cur_imp.lastrowid
+                                    # Upsert customer
+                                    upsert_customer(conn_imp, r["customer"], phone_norm(r["phone"]))
+                                    # Parse items if provided: "Coffee×2;Zobo×1"
+                                    if r["items_raw"]:
+                                        for item_str in r["items_raw"].split(";"):
+                                            item_str = item_str.strip()
+                                            if not item_str:
+                                                continue
+                                            # Try "Name×Qty" or "Name x Qty" or just "Name"
+                                            m = re.match(r"^(.+?)[×xX*]\s*(\d+(?:\.\d+)?)\s*$", item_str)
+                                            if m:
+                                                iname, iqty = m.group(1).strip(), float(m.group(2))
+                                            else:
+                                                iname, iqty = item_str, 1.0
+                                            # Look up product
+                                            pmatch = prods_df[prods_df["name"].str.lower()==iname.lower()]
+                                            if not pmatch.empty:
+                                                pr = pmatch.iloc[0]
+                                                uprice = float(pr["default_price"])
+                                                uratio = float(pr["cost_ratio"])
+                                                conn_imp.execute(
+                                                    "INSERT INTO order_items (order_id,product_id,product_name,"
+                                                    "channel,category,qty,unit_price,total_price,unit_cogs,total_cogs) "
+                                                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                                    (oid,str(pr["id"]),str(pr["name"]),str(pr["channel"]),
+                                                     str(pr["channel"]),iqty,uprice,round(iqty*uprice),
+                                                     round(uprice*uratio),round(iqty*uprice*uratio)))
+                                    imported += 1
+                                conn_imp.commit()
+                                bust()
+                                st.success(f"✅ Imported **{imported}** orders · Skipped **{skipped}** duplicates")
+                                st.balloons()
+                            except Exception as e:
+                                conn_imp.rollback()
+                                st.error(f"Import failed: {e}")
+                            finally:
+                                conn_imp.close()
+                except Exception as e:
+                    st.error(f"Could not read file: {e}")
+
+        else:
+            # ── EXPENSE IMPORT ────────────────────────────────────
+            st.markdown("#### 📄 Expense Import")
+
+            with st.expander("📋 Required CSV/Excel columns (click to view template)"):
+                st.markdown("""
+**Required columns:**
+| Column | Example | Notes |
+|---|---|---|
+| `date` | 2025-12-01 | YYYY-MM-DD format |
+| `name` | Market run | Description of expense |
+| `amount` | 15000 | Numbers only, no ₦ symbol |
+| `category` | Ingredients | Must match an expense category in your settings |
+
+**Optional columns:**
+| Column | Notes |
+|---|---|
+| `note` | Additional note |
+""")
+                template_exp = "date,name,amount,category,note\n"
+                template_exp += "2025-12-01,Tomatoes and pepper,8500,Ingredients,\n"
+                template_exp += "2025-12-03,PHCN bill,12000,Utilities,December\n"
+                template_exp += "2025-12-05,Staff wages,45000,Staff/Wages,Week 1\n"
+                st.download_button("⬇️ Download Expense Template CSV",
+                    data=template_exp.encode(),
+                    file_name="kokari_expense_import_template.csv", mime="text/csv")
+
+            uploaded_exp = st.file_uploader(
+                "Upload Expense CSV or Excel file",
+                type=["csv","xlsx","xls"],
+                key="imp_exp_upload")
+
+            if uploaded_exp:
+                try:
+                    if uploaded_exp.name.endswith(".csv"):
+                        exp_imp_df = pd.read_csv(uploaded_exp, dtype=str)
+                    else:
+                        exp_imp_df = pd.read_excel(uploaded_exp, dtype=str)
+                    exp_imp_df.columns = [c.strip().lower().replace(" ","_") for c in exp_imp_df.columns]
+                    st.success(f"✅ File loaded: **{len(exp_imp_df)} rows**")
+
+                    required_exp = {"date","name","amount","category"}
+                    missing_exp  = required_exp - set(exp_imp_df.columns)
+                    if missing_exp:
+                        st.error(f"❌ Missing required columns: {missing_exp}")
+                    else:
+                        st.markdown("**Preview (first 10 rows):**")
+                        st.dataframe(exp_imp_df.head(10), use_container_width=True, hide_index=True)
+
+                        exp_cats_all = load_exp_cats()
+                        errors_e, valid_exp = [], []
+                        for idx, row in exp_imp_df.iterrows():
+                            try:
+                                r_date = str(row.get("date","")).strip()
+                                r_name = str(row.get("name","")).strip()
+                                r_amt  = float(str(row.get("amount",0)).replace(",","").replace("₦",""))
+                                r_cat  = str(row.get("category","Miscellaneous")).strip()
+                                r_note = str(row.get("note","")).strip()
+                                date.fromisoformat(r_date)
+                                if not r_name:
+                                    raise ValueError("name is empty")
+                                # Auto-create category if missing
+                                if r_cat not in exp_cats_all:
+                                    r_cat = "Miscellaneous"
+                                valid_exp.append({
+                                    "date":r_date,"name":r_name,"amount":r_amt,
+                                    "category":r_cat,"note":r_note
+                                })
+                            except Exception as e:
+                                errors_e.append(f"Row {idx+2}: {e}")
+
+                        if errors_e:
+                            with st.expander(f"⚠️ {len(errors_e)} row(s) with errors (will be skipped)"):
+                                for e in errors_e[:20]:
+                                    st.caption(e)
+
+                        st.info(f"**{len(valid_exp)}** valid rows ready · **{len(errors_e)}** will be skipped")
+
+                        if valid_exp and st.button(
+                                f"📥 Import {len(valid_exp)} Expenses",
+                                type="primary", use_container_width=True, key="do_exp_import"):
+                            conn_exp = get_conn()
+                            imp_e, skip_e = 0, 0
+                            try:
+                                for r in valid_exp:
+                                    # Duplicate check: same date + name + amount
+                                    exists_e = conn_exp.execute(
+                                        "SELECT id FROM transactions WHERE date=? AND name=? AND amount=? AND type='expense'",
+                                        (r["date"],r["name"],r["amount"])).fetchone()
+                                    if exists_e:
+                                        skip_e += 1
+                                        continue
+                                    conn_exp.execute(
+                                        "INSERT INTO transactions (date,type,name,category,amount,cogs,note) "
+                                        "VALUES (?,'expense',?,?,?,0,?)",
+                                        (r["date"],r["name"],r["category"],r["amount"],r["note"]))
+                                    imp_e += 1
+                                conn_exp.commit()
+                                bust()
+                                st.success(f"✅ Imported **{imp_e}** expenses · Skipped **{skip_e}** duplicates")
+                                st.balloons()
+                            except Exception as e:
+                                conn_exp.rollback()
+                                st.error(f"Import failed: {e}")
+                            finally:
+                                conn_exp.close()
+                except Exception as e:
+                    st.error(f"Could not read file: {e}")
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 9 — SETTINGS
+    # ══════════════════════════════════════════════════════════════
+    with tabs[10]:
         st.markdown("### ⚙️ Settings")
         exp_cats = load_exp_cats()
         s1,s2 = st.columns(2)
