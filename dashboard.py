@@ -2514,15 +2514,12 @@ def main():
 
             if uploaded_sales:
                 try:
-                    if uploaded_sales.name.endswith(".csv"):
-                        imp_df = pd.read_csv(uploaded_sales, dtype=str)
+                    import io as _io
+                    raw_bytes = uploaded_sales.read()
+                    if uploaded_sales.name.lower().endswith(".csv"):
+                        imp_df = pd.read_csv(_io.BytesIO(raw_bytes), dtype=str)
                     else:
-                        try:
-                            imp_df = pd.read_excel(uploaded_sales, dtype=str, engine="openpyxl")
-                        except ImportError:
-                            st.error("❌ openpyxl is not installed. Add `openpyxl` to requirements.txt "
-                                     "and restart the app, or upload a .csv file instead.")
-                            st.stop()
+                        imp_df = pd.read_excel(_io.BytesIO(raw_bytes), dtype=str, engine="openpyxl")
                     imp_df.columns = [c.strip().lower().replace(" ","_") for c in imp_df.columns]
                     st.success(f"✅ File loaded: **{len(imp_df)} rows**, **{len(imp_df.columns)} columns**")
                     st.caption(f"Columns found: {list(imp_df.columns)}")
@@ -2664,15 +2661,12 @@ def main():
 
             if uploaded_exp:
                 try:
-                    if uploaded_exp.name.endswith(".csv"):
-                        exp_imp_df = pd.read_csv(uploaded_exp, dtype=str)
+                    import io as _io
+                    raw_bytes_e = uploaded_exp.read()
+                    if uploaded_exp.name.lower().endswith(".csv"):
+                        exp_imp_df = pd.read_csv(_io.BytesIO(raw_bytes_e), dtype=str)
                     else:
-                        try:
-                            exp_imp_df = pd.read_excel(uploaded_exp, dtype=str, engine="openpyxl")
-                        except ImportError:
-                            st.error("❌ openpyxl is not installed. Add `openpyxl` to requirements.txt "
-                                     "and restart the app, or upload a .csv file instead.")
-                            st.stop()
+                        exp_imp_df = pd.read_excel(_io.BytesIO(raw_bytes_e), dtype=str, engine="openpyxl")
                     exp_imp_df.columns = [c.strip().lower().replace(" ","_") for c in exp_imp_df.columns]
                     st.success(f"✅ File loaded: **{len(exp_imp_df)} rows**")
 
